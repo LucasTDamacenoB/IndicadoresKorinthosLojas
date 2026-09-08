@@ -696,3 +696,160 @@ def get_strategic_diagnostics(df):
         })
         
     return diag
+
+
+# ═══════════════════════════════════════════════════════════════════
+# COMPARATIVO MÊS ATUAL vs MÊS ANTERIOR (DELTAS)
+# ═══════════════════════════════════════════════════════════════════
+
+# Métricas onde MENOR é MELHOR (delta negativo = melhoria)
+_INVERTED_METRICS = {"tme_medio", "id_cliente_2min"}
+
+# Mapeamento de chaves do cp_summary para nomes legíveis
+_CP_DELTA_KEYS = [
+    "nps_geral", "tme_medio", "conversao_digital",
+    "id_cliente_cpf", "id_cliente_2min", "desafio_fidelidade",
+    "skin_share", "receita_total_gmv", "meta_pef_atingimento",
+    "ticket_medio", "itens_boleto", "boleto_turbinado",
+    "boleto_promocional", "resgate_fidelidade", "conversao_fluxo",
+]
+
+# Colunas do DataFrame consolidado para comparação por PDV
+_PDV_DELTA_COLS = [
+    "nps", "receita", "meta_pef_realizado", "tme_ajustado_segundos",
+    "conversao_digital", "id_cliente_cpf", "id_cliente_2min",
+    "penetracao_desafio_fidelidade", "cuidados_faciais",
+    "itens_boleto", "boletos_turbinados", "boletos_promocionais",
+    "resgate_fidelidade", "conversao_acao_fluxo", "score_global",
+]
+
+# Colunas de PDV onde menor é melhor
+_PDV_INVERTED = {"tme_ajustado_segundos", "id_cliente_2min"}
+
+
+def _safe_delta(atual, anterior):
+    """Calcula diferença numérica segura entre dois valores."""
+    if pd.isna(atual) or pd.isna(anterior) or atual is None or anterior is None:
+        return np.nan
+    try:
+        return float(atual) - float(anterior)
+    except (ValueError, TypeError):
+        return np.nan
+
+
+def compute_deltas(
+    df_atual: pd.DataFrame,
+    df_anterior: Optional[pd.DataFrame],
+    cp_atual: dict,
+    cp_anterior: Optional[dict],
+) -> tuple:
+    """
+    Calcula as variações (deltas) entre mês atual e mês anterior.
+    
+    Retorna:
+        deltas_cp: dict com chave = nome do KPI, valor = float (diferença)
+        deltas_pdv: DataFrame indexado por PDV com colunas delta_<metrica>
+    """
+    # --- 1. Deltas CP (nível franquia) ---
+    deltas_cp = {}
+    if cp_anterior:
+        for key in _CP_DELTA_KEYS:
+            v_atual = cp_atual.get(key)
+            v_ant = cp_anterior.get(key)
+            
+            # TME é string (HH:MM:SS) — converter para segundos antes de comparar
+            if key == "tme_medio":
+                v_atual = _time_str_to_seconds(v_atual) if v_atual else 0
+                v_ant = _time_str_to_seconds(v_ant) if v_ant else 0
+            
+            delta = _safe_delta(v_atual, v_ant)
+            if pd.notna(delta):
+                deltas_cp[key] = delta
+
+    # --- 2. Deltas PDV (nível loja) ---
+    deltas_pdv = pd.DataFrame()
+    if df_anterior is not None and not df_anterior.empty and not df_atual.empty:
+        # Merge pelo código do PDV
+        df_ant_idx = df_anterior.set_index("pdv") if "pdv" in df_anterior.columns else df_anterior
+        df_atu_idx = df_atual.set_index("pdv") if "pdv" in df_atual.columns else df_atual
+        
+        delta_rows = {}
+        for pdv in df_atu_idx.index:
+            if pdv not in df_ant_idx.index:
+                continue
+            row_deltas = {}
+            for col in _PDV_DELTA_COLS:
+                if col in df_atu_idx.columns and col in df_ant_idx.columns:
+                    row_deltas[f"delta_{col}"] = _safe_delta(
+                        df_atu_idx.loc[pdv, col],
+                        df_ant_idx.loc[pdv, col]
+                    )
+            delta_rows[pdv] = row_deltas
+        
+        if delta_rows:
+            deltas_pdv = pd.DataFrame.from_dict(delta_rows, orient="index")
+            deltas_pdv.index.name = "pdv"
+            deltas_pdv.reset_index(inplace=True)
+
+    return deltas_cp, deltas_pdv
+
+
+def is_inverted_metric(key: str) -> bool:
+    """Retorna True se a métrica é invertida (menor = melhor)."""
+    return key in _INVERTED_METRICS or key in _PDV_INVERTED
+
+
+def format_delta(delta_val, fmt_type="pct", inverted=False, as_html=True):
+    """
+    Formata um delta para exibição com seta colorida.
+    
+    Args:
+        delta_val: valor numérico da diferença
+        fmt_type: "pct" (percentual), "pts" (pontos), "time" (segundos), "brl" (reais), "dec" (decimal), "int" (inteiro)
+        inverted: True se menor é melhor (ex: TME)
+        as_html: Se True, retorna <span> estilizado com cor; se False, retorna apenas texto com seta
+    
+    Returns:
+        String formatada (HTML ou texto)
+    """
+    if pd.isna(delta_val) or delta_val is None:
+        return ""
+    
+    try:
+        d = float(delta_val)
+    except (ValueError, TypeError):
+        return ""
+    
+    if abs(d) < 0.0001:
+        return '<span style="color: #64748B; font-size: 12px;">➡️ Estável</span>' if as_html else "➡️ Estável"
+    
+    # Determinar se é melhoria ou piora
+    is_improvement = (d < 0) if inverted else (d > 0)
+    
+    arrow = "🔼" if d > 0 else "🔽"
+    color = "#059669" if is_improvement else "#DC2626"
+    
+    # Formatação do valor
+    sign = "+" if d > 0 else ""
+    if fmt_type == "pct":
+        txt = f"{sign}{d * 100:.2f}%".replace('.', ',')
+    elif fmt_type == "pts":
+        txt = f"{sign}{d:.2f} pts".replace('.', ',')
+    elif fmt_type == "time":
+        secs = abs(int(d))
+        m, s = divmod(secs, 60)
+        txt = f"{sign}{'-' if d < 0 else ''}{m:02d}:{s:02d}"
+    elif fmt_type == "brl":
+        txt = f"{sign}R$ {abs(d):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+        if d < 0:
+            txt = f"-R$ {abs(d):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+    elif fmt_type == "dec":
+        txt = f"{sign}{d:.2f}".replace('.', ',')
+    elif fmt_type == "int":
+        txt = f"{sign}{int(d):,}".replace(',', '.')
+    else:
+        txt = f"{sign}{d:.4f}".replace('.', ',')
+    
+    if as_html:
+        return f'<span style="color: {color}; font-size: 12px; font-weight: 700;">{arrow} {txt}</span>'
+    return f"{arrow} {txt}"

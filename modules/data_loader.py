@@ -396,21 +396,39 @@ def parse_nps_geral(source) -> Optional[Dict[str, Any]]:
 # AUTO-DISCOVERY DE ARQUIVOS LOCAIS
 # ═══════════════════════════════════════════════════════════════════
 
-def auto_discover_local_files(dados_dir: str = "Dados") -> list:
-    """Busca automaticamente planilhas padrão na pasta Dados/ ou na raiz do projeto."""
+def auto_discover_local_files(subdir: str = "mes_atual") -> list:
+    """
+    Busca automaticamente planilhas padrão na subpasta especificada de Dados/.
+    
+    Prioridade:
+      1. Dados/<subdir>/*.xlsx  (ex: Dados/mes_atual/, Dados/mes_anterior/)
+      2. Dados/*.xlsx           (fallback: compatibilidade retroativa)
+      3. Raiz do projeto *.xlsx (último recurso)
+    """
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if not os.path.isabs(dados_dir):
-        dados_dir = os.path.join(base_dir, dados_dir)
-        
+    dados_base = os.path.join(base_dir, "Dados")
+    
+    # 1. Tenta a subpasta específica (mes_atual ou mes_anterior)
+    subdir_path = os.path.join(dados_base, subdir)
     found_files = []
-    if os.path.isdir(dados_dir):
-        for f in sorted(glob.glob(os.path.join(dados_dir, "*.xlsx"))):
+    
+    if os.path.isdir(subdir_path):
+        for f in sorted(glob.glob(os.path.join(subdir_path, "*.xlsx"))):
             if not os.path.basename(f).startswith("~$"):
                 found_files.append(f)
-                
-    for f in sorted(glob.glob(os.path.join(base_dir, "*.xlsx"))):
-        if not os.path.basename(f).startswith("~$") and f not in found_files:
-            found_files.append(f)
+    
+    # 2. Fallback apenas para mes_atual se a subpasta não existir ou estiver vazia
+    if not found_files and subdir == "mes_atual":
+        if os.path.isdir(dados_base):
+            for f in sorted(glob.glob(os.path.join(dados_base, "*.xlsx"))):
+                if not os.path.basename(f).startswith("~$"):
+                    found_files.append(f)
+        
+        # 3. Último recurso: raiz do projeto
+        if not found_files:
+            for f in sorted(glob.glob(os.path.join(base_dir, "*.xlsx"))):
+                if not os.path.basename(f).startswith("~$") and f not in found_files:
+                    found_files.append(f)
             
     return found_files
 

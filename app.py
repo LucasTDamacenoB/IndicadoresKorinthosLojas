@@ -34,7 +34,7 @@ importlib.reload(calculators)
 importlib.reload(visualizations)
 importlib.reload(pdf_report)
 
-from modules.calculators import build_consolidated, get_consultant_data, get_cp_summary
+from modules.calculators import build_consolidated, get_consultant_data, get_cp_summary, compute_deltas
 from modules.config import APP_CONFIG, TARGET_PDVS, get_pdv_label
 from modules.data_loader import auto_discover_local_files, load_all_files
 from modules.pdf_report import generate_pdf_report
@@ -223,14 +223,28 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════════
 
 
-local_files = auto_discover_local_files()
+# Mês atual (fonte principal)
+local_files = auto_discover_local_files("mes_atual")
 if uploaded_files:
     data = load_all_files(uploaded_files, base_files=local_files)
 else:
     data = load_all_files(local_files)
 
+# Mês anterior (referência para comparativo)
+local_files_ant = auto_discover_local_files("mes_anterior")
+data_ant = load_all_files(local_files_ant) if local_files_ant else {}
+
 df = build_consolidated(data)
+df_ant = build_consolidated(data_ant) if data_ant and data_ant.get("_log") else None
 cp_summary = get_cp_summary(data)
+cp_ant = get_cp_summary(data_ant) if data_ant and data_ant.get("_log") else {}
+deltas_cp, deltas_pdv = compute_deltas(df, df_ant, cp_summary, cp_ant)
+
+# Injetar deltas no dict de dados para propagar para as tabs
+data["_deltas_cp"] = deltas_cp
+data["_deltas_pdv"] = deltas_pdv
+data["_periodo_anterior"] = data_ant.get("_periodo", "") if data_ant else ""
+
 consultant_df = get_consultant_data(data)
 periodo_exibicao = data.get("_periodo", "Período Atual") if data else "Período Atual"
 
@@ -243,10 +257,17 @@ if df is not None and not df.empty:
     # Log de arquivos na sidebar
     with info_placeholder.container():
         with st.expander("📋 Planilhas Processadas", expanded=False):
+            st.markdown(f"**Mês Atual ({len(data.get('_log', []))} arquivos):**")
             for log_line in data.get("_log", []):
                 render_html(
                     f'<div style="font-size: 12px; color: #334155; margin-bottom: 3px;">{log_line}</div>'
                 )
+            if data_ant and data_ant.get("_log"):
+                st.markdown(f"**Mês Anterior ({len(data_ant.get('_log', []))} arquivos):**")
+                for log_line in data_ant.get("_log", []):
+                    render_html(
+                        f'<div style="font-size: 12px; color: #64748B; margin-bottom: 3px;">{log_line}</div>'
+                    )
 
     # Botão de exportação PDF na sidebar
     with pdf_placeholder.container():
@@ -264,6 +285,7 @@ if df is not None and not df.empty:
             st.error(f"Exportação PDF: {e}")
 
     # ─── HEADER INSTITUCIONAL ─────────────────────────────────────
+    ref_ant_badge = f'<div style="font-size: 11px; color: #A7F3D0; margin-top: 2px;">Ref. Anterior: {data.get("_periodo_anterior")}</div>' if data.get("_periodo_anterior") else ''
     render_html(f"""
     <div style="background: linear-gradient(135deg, #004225 0%, #1B4D3E 100%); padding: 22px 28px; border-radius: 14px; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,66,37,0.15); color: #FFFFFF;">
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
@@ -281,6 +303,7 @@ if df is not None and not df.empty:
             <div style="background-color: rgba(255, 255, 255, 0.15); border: 1px solid rgba(255, 255, 255, 0.25); border-radius: 10px; padding: 10px 18px; text-align: right;">
                 <div style="font-size: 11px; font-weight: 700; color: #A7F3D0; text-transform: uppercase; letter-spacing: 0.5px;">Competência</div>
                 <div style="font-size: 18px; font-weight: 800; color: #FFFFFF;">{periodo_exibicao}</div>
+                {ref_ant_badge}
             </div>
         </div>
     </div>

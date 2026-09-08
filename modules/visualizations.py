@@ -15,6 +15,7 @@ from typing import Dict, Any, Optional
 
 import modules.config as config
 import modules.calculators as calculators
+from modules.calculators import format_delta, is_inverted_metric
 from modules.config import TARGET_PDVS, get_pdv_label
 
 
@@ -68,6 +69,23 @@ def filter_consultants(cdf: pd.DataFrame, excluir_gerencia: bool = True, busca_c
     return cdf
 
 
+def _get_deltas(data_raw):
+    """Extrai dicts de deltas do data_raw injetado pelo app.py."""
+    if not data_raw:
+        return {}, pd.DataFrame()
+    return data_raw.get("_deltas_cp", {}), data_raw.get("_deltas_pdv", pd.DataFrame())
+
+
+def _delta_col_for_pdv(deltas_pdv, df_filtered, col_name, fmt_type="pct", inverted=False):
+    """Gera uma Series com texto formatado de delta para uma coluna específica por PDV."""
+    delta_key = f"delta_{col_name}"
+    if deltas_pdv.empty or delta_key not in deltas_pdv.columns:
+        return None
+    
+    merged = df_filtered[["pdv"]].merge(deltas_pdv[["pdv", delta_key]], on="pdv", how="left")
+    return merged[delta_key].apply(lambda x: format_delta(x, fmt_type, inverted, as_html=False) or "-")
+
+
 # ═══════════════════════════════════════════════════════════════════
 # COMPONENTES VISUAIS REUTILIZÁVEIS E THEME SYSTEM
 # ═══════════════════════════════════════════════════════════════════
@@ -92,6 +110,7 @@ def style_table(df_show: pd.DataFrame, highlight_rules: dict = None):
     Aplica formatação visual profissional ao DataFrame:
     - Destaca status em Verde (✓ / ✅) e Vermelho (❌)
     - Aplica regras customizadas por coluna (ex: TME > 7min em vermelho, Vs. Anterior negativo em vermelho, etc.)
+    - Aplica automaticamente destaque de cores para colunas com setas de variação (Δ / Delta)
     """
     styler = df_show.style
     
@@ -103,11 +122,31 @@ def style_table(df_show: pd.DataFrame, highlight_rules: dict = None):
         if '✓' in val or '✅' in val or 'Batida' in val or 'Atingida' in val or 'No Prazo' in val:
             return 'color: #059669; font-weight: 700;'
         return ''
+
+    def highlight_delta(val, inverted=False):
+        if not isinstance(val, str):
+            return ''
+        if '🔼' in val:
+            return 'color: #DC2626; font-weight: 700;' if inverted else 'color: #059669; font-weight: 700;'
+        if '🔽' in val:
+            return 'color: #059669; font-weight: 700;' if inverted else 'color: #DC2626; font-weight: 700;'
+        if '➡️' in val:
+            return 'color: #64748B; font-weight: 600;'
+        return ''
         
     if hasattr(styler, 'map'):
         styler = styler.map(highlight_status)
     elif hasattr(styler, 'applymap'):
         styler = styler.applymap(highlight_status)
+
+    for col in df_show.columns:
+        if 'Δ' in col or 'Delta' in col:
+            is_inv = any(inv in col.lower() for inv in ['tme', '2min', 'tempo'])
+            rule = (lambda v, inv=is_inv: highlight_delta(v, inv))
+            if hasattr(styler, 'map'):
+                styler = styler.map(rule, subset=[col])
+            elif hasattr(styler, 'applymap'):
+                styler = styler.applymap(rule, subset=[col])
         
     if highlight_rules:
         for col_name, rule_fn in highlight_rules.items():
@@ -165,6 +204,7 @@ def render_kpis(kpis_list: list):
         meta = item.get("meta", "")
         atingido = item.get("atingido", None)
         info = item.get("info", "")
+        delta_html = item.get("delta", "")
 
         if atingido is not None:
             if bool(atingido):
@@ -180,6 +220,8 @@ def render_kpis(kpis_list: list):
             status_badge = ""
             border_color = "#E2E8F0"
 
+        delta_row = f'<div style="margin-top: 3px;">{delta_html}</div>' if delta_html else ""
+
         with cols[i]:
             render_html(f"""
             <div style="background-color: #FFFFFF; border: 1.5px solid {border_color}; border-radius: 12px;
@@ -194,6 +236,7 @@ def render_kpis(kpis_list: list):
                     <div style="font-size: 24px; font-weight: 800; color: {val_color}; line-height: 1.1;">
                         {valor}
                     </div>
+                    {delta_row}
                 </div>
                 <div style="font-size: 12px; color: #64748B; font-weight: 600; margin-top: 6px; border-top: 1px dashed #F1F5F9; padding-top: 4px;">
                     {f"🎯 <b>Meta:</b> {meta}" if meta else info}
@@ -299,6 +342,9 @@ def render_tab_nps(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = Non
     )
 
     cp_info = calculators.get_cp_summary(data_raw) if data_raw else {}
+    deltas_cp, deltas_pdv = _get_deltas(data_raw)
+    delta_nps = deltas_cp.get("nps_geral")
+    delta_nps_html = format_delta(delta_nps, "pts") if delta_nps is not None else ""
 
     # 1. NPS Geral do CP
     nps_geral = cp_info.get("nps_geral")
@@ -343,6 +389,7 @@ def render_tab_nps(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = Non
             "valor": fmt_pct(nps_pct, 2),
             "meta": "≥ 90,90% (IAF 2026)",
             "atingido": bool(nps_pct >= 0.909),
+            "delta": delta_nps_html,
         },
         {
             "label": "Variação vs. Ano Anterior",
@@ -372,15 +419,18 @@ def render_tab_nps(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = Non
 
     render_html("<h4 style='color: #0F172A; font-weight: 700; margin-top: 14px;'>Desempenho dos 9 PDVs</h4>")
     dff_table = dff.sort_values("nps", ascending=False).copy()
+    delta_nps_col = _delta_col_for_pdv(deltas_pdv, dff_table, "nps", fmt_type="pts")
     
     dff_show = pd.DataFrame({
         "Loja": dff_table["label"],
         "Cidade": dff_table["cidade"],
         "Registros": dff_table["nps_registros"].fillna(0).apply(lambda x: f"{int(x):,}").str.replace(',', '.'),
         "NPS Loja (%)": dff_table["nps"].apply(lambda x: f"{x:.2f}%".replace('.', ',') if pd.notna(x) else "-"),
-        "Gap p/ Meta (90,90%)": dff_table["nps"].apply(lambda x: f"{x - 90.9:+.2f} pts".replace('.', ',') if pd.notna(x) else "-"),
-        "Status": dff_table["nps"].apply(lambda x: "✅ Atingida" if pd.notna(x) and x >= 90.9 else "❌ Abaixo"),
     })
+    if delta_nps_col is not None:
+        dff_show["Δ Mês Ant."] = delta_nps_col.values
+    dff_show["Gap p/ Meta (90,90%)"] = dff_table["nps"].apply(lambda x: f"{x - 90.9:+.2f} pts".replace('.', ',') if pd.notna(x) else "-")
+    dff_show["Status"] = dff_table["nps"].apply(lambda x: "✅ Atingida" if pd.notna(x) and x >= 90.9 else "❌ Abaixo")
 
     def rule_nps(val):
         if not isinstance(val, str): return ''
@@ -422,6 +472,12 @@ def render_tab_tme(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = Non
     )
 
     cp_info = calculators.get_cp_summary(data_raw) if data_raw else {}
+    deltas_cp, deltas_pdv = _get_deltas(data_raw)
+    delta_tme = deltas_cp.get("tme_medio")
+    delta_tme_html = format_delta(delta_tme, "time", inverted=True) if delta_tme is not None else ""
+    delta_conv = deltas_cp.get("conversao_digital")
+    delta_conv_html = format_delta(delta_conv, "pct") if delta_conv is not None else ""
+
     tme_cp = cp_info.get("tme_medio")
     if not tme_cp or tme_cp == "00:00:00":
         avg_secs = df["tme_ajustado_segundos"].mean()
@@ -440,12 +496,14 @@ def render_tab_tme(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = Non
             "valor": str(tme_cp),
             "meta": "≤ 00:07:00",
             "atingido": bool(tme_secs <= 420 and tme_secs > 0) if tme_secs > 0 else None,
+            "delta": delta_tme_html,
         },
         {
             "label": "Taxa de Conversão Digital (CP)",
             "valor": fmt_pct(conv_cp, 2),
             "meta": "> 10,00%",
             "atingido": bool(conv_cp >= 0.10) if pd.notna(conv_cp) else None,
+            "delta": delta_conv_html,
         }
     ])
 
@@ -464,6 +522,8 @@ def render_tab_tme(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = Non
     render_html("<h4 style='color: #0F172A; font-weight: 700; margin-top: 14px;'>Desempenho dos 9 PDVs</h4>")
     dff_table = dff.copy()
     dff_table = dff_table.sort_values(conv_col, ascending=False)
+    delta_tme_col = _delta_col_for_pdv(deltas_pdv, dff_table, "tme_ajustado_segundos", fmt_type="time", inverted=True)
+    delta_conv_col = _delta_col_for_pdv(deltas_pdv, dff_table, "conversao_digital", fmt_type="pct")
 
     dff_show = pd.DataFrame({
         "Loja": dff_table["label"],
@@ -471,10 +531,14 @@ def render_tab_tme(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = Non
         "Encaminhados": dff_table["clientes_encaminhados"].fillna(0).apply(lambda x: f"{int(x):,}").str.replace(',', '.'),
         "Atendidos": dff_table["clientes_atendidos"].fillna(0).apply(lambda x: f"{int(x):,}").str.replace(',', '.'),
         "TME Ajustado": dff_table["tme_ajustado"].fillna("-"),
-        "Convertidos": dff_table["clientes_convertidos"].fillna(0).apply(lambda x: f"{int(x):,}").str.replace(',', '.'),
-        "% Conversão Digital": dff_table[conv_col].apply(lambda x: fmt_pct(x, 2)),
-        "TME Status": dff_table["tme_ajustado_segundos"].apply(lambda s: "✅ No Prazo" if pd.notna(s) and s <= 420 else "❌ Excedido"),
     })
+    if delta_tme_col is not None:
+        dff_show["Δ TME Ant."] = delta_tme_col.values
+    dff_show["Convertidos"] = dff_table["clientes_convertidos"].fillna(0).apply(lambda x: f"{int(x):,}").str.replace(',', '.')
+    dff_show["% Conversão Digital"] = dff_table[conv_col].apply(lambda x: fmt_pct(x, 2))
+    if delta_conv_col is not None:
+        dff_show["Δ Conv. Ant."] = delta_conv_col.values
+    dff_show["TME Status"] = dff_table["tme_ajustado_segundos"].apply(lambda s: "✅ No Prazo" if pd.notna(s) and s <= 420 else "❌ Excedido")
 
     def rule_tme(val):
         if not isinstance(val, str) or val in ["-", "", "nan", "None"]: return ''
@@ -529,6 +593,12 @@ def render_tab_idcliente(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame]
 
     cpf_cp = 1.0899
     b2m_cp = 0.2146
+    deltas_cp, deltas_pdv = _get_deltas(data_raw)
+    delta_cpf = deltas_cp.get("id_cliente_cpf")
+    delta_cpf_html = format_delta(delta_cpf, "pct") if delta_cpf is not None else ""
+    delta_2min = deltas_cp.get("id_cliente_2min")
+    delta_2min_html = format_delta(delta_2min, "pct", inverted=True) if delta_2min is not None else ""
+
     if data_raw:
         cp_info = calculators.get_cp_summary(data_raw)
         cpf_cp = cp_info.get("id_cliente_cpf", 1.0899)
@@ -540,12 +610,14 @@ def render_tab_idcliente(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame]
             "valor": fmt_pct(cpf_cp, 2),
             "meta": "≥ 115,00%",
             "atingido": bool(cpf_cp >= 1.15),
+            "delta": delta_cpf_html,
         },
         {
             "label": "% Boletos ID Cliente < 2 min",
             "valor": fmt_pct(b2m_cp, 2),
             "meta": "≤ 30,00%",
             "atingido": bool(b2m_cp <= 0.30),
+            "delta": delta_2min_html,
         }
     ])
 
@@ -562,16 +634,22 @@ def render_tab_idcliente(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame]
 
     render_html("<h4 style='color: #0F172A; font-weight: 700; margin-top: 14px;'>Desempenho dos 9 PDVs</h4>")
     dff_table = dff.sort_values("id_cliente_cpf", ascending=False).copy()
+    delta_cpf_col = _delta_col_for_pdv(deltas_pdv, dff_table, "id_cliente_cpf", fmt_type="pct")
+    delta_2min_col = _delta_col_for_pdv(deltas_pdv, dff_table, "id_cliente_2min", fmt_type="pct", inverted=True)
 
     dff_show = pd.DataFrame({
         "Loja": dff_table["label"],
         "Cidade": dff_table["cidade"],
         "% Atendimento CPF": dff_table["id_cliente_cpf"].apply(lambda x: fmt_pct(x, 2)),
-        "TMA CPF": dff_table["id_cliente_tma"].fillna("-"),
-        "% Boletos < 2min": dff_table["id_cliente_2min"].apply(lambda x: fmt_pct(x, 2)),
-        "% Boletos Válidos IAF": dff_table["id_cliente_validos"].apply(lambda x: fmt_pct(x, 2)),
-        "Status CPF": dff_table["id_cliente_cpf"].apply(lambda x: "✅ Batida" if pd.notna(x) and x >= 1.15 else "❌ Abaixo"),
     })
+    if delta_cpf_col is not None:
+        dff_show["Δ CPF Ant."] = delta_cpf_col.values
+    dff_show["TMA CPF"] = dff_table["id_cliente_tma"].fillna("-")
+    dff_show["% Boletos < 2min"] = dff_table["id_cliente_2min"].apply(lambda x: fmt_pct(x, 2))
+    if delta_2min_col is not None:
+        dff_show["Δ <2min Ant."] = delta_2min_col.values
+    dff_show["% Boletos Válidos IAF"] = dff_table["id_cliente_validos"].apply(lambda x: fmt_pct(x, 2))
+    dff_show["Status CPF"] = dff_table["id_cliente_cpf"].apply(lambda x: "✅ Batida" if pd.notna(x) and x >= 1.15 else "❌ Abaixo")
 
     def rule_cpf(val):
         if not isinstance(val, str): return ''
@@ -631,6 +709,10 @@ def render_tab_fidelidade(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame
     )
 
     fid_cp = 0.1712
+    deltas_cp, deltas_pdv = _get_deltas(data_raw)
+    delta_fid = deltas_cp.get("desafio_fidelidade")
+    delta_fid_html = format_delta(delta_fid, "pct") if delta_fid is not None else ""
+
     if data_raw:
         cp_info = calculators.get_cp_summary(data_raw)
         fid_cp = cp_info.get("desafio_fidelidade", 0.1712)
@@ -641,6 +723,7 @@ def render_tab_fidelidade(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame
             "valor": fmt_pct(fid_cp, 2),
             "meta": "20,00%",
             "atingido": bool(fid_cp >= 0.20),
+            "delta": delta_fid_html,
         }
     ])
 
@@ -657,6 +740,7 @@ def render_tab_fidelidade(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame
 
     render_html("<h4 style='color: #0F172A; font-weight: 700; margin-top: 14px;'>Desempenho dos 9 PDVs</h4>")
     dff_table = dff.sort_values("penetracao_desafio_fidelidade", ascending=False).copy()
+    delta_fid_col = _delta_col_for_pdv(deltas_pdv, dff_table, "penetracao_desafio_fidelidade", fmt_type="pct")
 
     dff_show = pd.DataFrame({
         "Loja": dff_table["label"],
@@ -664,9 +748,11 @@ def render_tab_fidelidade(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame
         "Boletos com Desafio": dff_table["boletos_desafio_qtd"].fillna(0).apply(lambda x: f"{int(x):,}").str.replace(',', '.'),
         "Boletos Fidelidade": dff_table["boletos_fidelidade_qtd"].fillna(0).apply(lambda x: f"{int(x):,}").str.replace(',', '.'),
         "% Penetração Desafios": dff_table["penetracao_desafio_fidelidade"].apply(lambda x: fmt_pct(x, 2)),
-        "Gap p/ Meta (20,00%)": dff_table["penetracao_desafio_fidelidade"].apply(lambda x: f"{x - 0.20:+.2%}".replace('.', ',') if pd.notna(x) else "-"),
-        "Status": dff_table["penetracao_desafio_fidelidade"].apply(lambda x: "✅ Batida" if pd.notna(x) and x >= 0.20 else "❌ Abaixo"),
     })
+    if delta_fid_col is not None:
+        dff_show["Δ Mês Ant."] = delta_fid_col.values
+    dff_show["Gap p/ Meta (20,00%)"] = dff_table["penetracao_desafio_fidelidade"].apply(lambda x: f"{x - 0.20:+.2%}".replace('.', ',') if pd.notna(x) else "-")
+    dff_show["Status"] = dff_table["penetracao_desafio_fidelidade"].apply(lambda x: "✅ Batida" if pd.notna(x) and x >= 0.20 else "❌ Abaixo")
 
     def rule_fidelidade(val):
         if not isinstance(val, str): return ''
@@ -715,6 +801,10 @@ def render_tab_skin(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = No
     )
 
     cp_info = calculators.get_cp_summary(data_raw) if data_raw else {}
+    deltas_cp, deltas_pdv = _get_deltas(data_raw)
+    delta_skin = deltas_cp.get("skin_share")
+    delta_skin_html = format_delta(delta_skin, "pct") if delta_skin is not None else ""
+
     skin_cp = cp_info.get("skin_share")
     if pd.isna(skin_cp):
         skin_cp = df["cuidados_faciais"].mean()
@@ -730,6 +820,7 @@ def render_tab_skin(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = No
             "valor": fmt_pct(skin_cp, 2),
             "meta": "≥ 2,10% (Regional SP)",
             "atingido": bool(skin_cp >= 0.021) if pd.notna(skin_cp) else None,
+            "delta": delta_skin_html,
         }
     ])
 
@@ -746,15 +837,18 @@ def render_tab_skin(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = No
 
     render_html("<h4 style='color: #0F172A; font-weight: 700; margin-top: 14px;'>Desempenho dos 9 PDVs</h4>")
     dff_table = dff.sort_values("cuidados_faciais", ascending=False).copy()
+    delta_skin_col = _delta_col_for_pdv(deltas_pdv, dff_table, "cuidados_faciais", fmt_type="pct")
 
     dff_show = pd.DataFrame({
         "Loja": dff_table["label"],
         "Cidade": dff_table["cidade"],
         "Receita Cuidados Faciais (R$)": dff_table["receita_skin"].apply(fmt_brl),
         "% Share Skin": dff_table["cuidados_faciais"].apply(lambda x: fmt_pct(x, 2)),
-        "Gap p/ Meta (2,10%)": dff_table["cuidados_faciais"].apply(lambda x: f"{x - 0.021:+.2%}".replace('.', ',') if pd.notna(x) else "-"),
-        "Status": dff_table["cuidados_faciais"].apply(lambda x: "✅ Batida" if pd.notna(x) and x >= 0.021 else "❌ Abaixo"),
     })
+    if delta_skin_col is not None:
+        dff_show["Δ Mês Ant."] = delta_skin_col.values
+    dff_show["Gap p/ Meta (2,10%)"] = dff_table["cuidados_faciais"].apply(lambda x: f"{x - 0.021:+.2%}".replace('.', ',') if pd.notna(x) else "-")
+    dff_show["Status"] = dff_table["cuidados_faciais"].apply(lambda x: "✅ Batida" if pd.notna(x) and x >= 0.021 else "❌ Abaixo")
 
     def rule_skin(val):
         if not isinstance(val, str): return ''
@@ -813,6 +907,7 @@ def render_tab_indicadores(df: pd.DataFrame, consultant_df: Optional[pd.DataFram
     render_html("<p style='color: #475569; font-size: 13px; margin-bottom: 12px;'><b>Metas:</b> Itens/Boleto: 2,5 | Bol. Turbinado: 31% | Bol. Promocional: 33% | Resgate Fidelidade: 52% | Ação Fluxo: 28%</p>")
 
     cp_info = calculators.get_cp_summary(data_raw) if data_raw else {}
+    deltas_cp, deltas_pdv = _get_deltas(data_raw)
     
     tm_cp = cp_info.get("ticket_medio")
     if pd.isna(tm_cp):
@@ -835,13 +930,20 @@ def render_tab_indicadores(df: pd.DataFrame, consultant_df: Optional[pd.DataFram
     fluxo_cp = cp_info.get("conversao_fluxo")
     if pd.isna(fluxo_cp): fluxo_cp = df["conversao_acao_fluxo"].mean()
 
+    delta_tm_html = format_delta(deltas_cp.get("ticket_medio"), "brl") if deltas_cp.get("ticket_medio") is not None else ""
+    delta_ipb_html = format_delta(deltas_cp.get("itens_boleto"), "dec") if deltas_cp.get("itens_boleto") is not None else ""
+    delta_bt_html = format_delta(deltas_cp.get("boleto_turbinado"), "pct") if deltas_cp.get("boleto_turbinado") is not None else ""
+    delta_bp_html = format_delta(deltas_cp.get("boleto_promocional"), "pct") if deltas_cp.get("boleto_promocional") is not None else ""
+    delta_resg_html = format_delta(deltas_cp.get("resgate_fidelidade"), "pct") if deltas_cp.get("resgate_fidelidade") is not None else ""
+    delta_fluxo_html = format_delta(deltas_cp.get("conversao_fluxo"), "pct") if deltas_cp.get("conversao_fluxo") is not None else ""
+
     render_kpis([
-        {"label": "Ticket Médio (CP)", "valor": fmt_brl(tm_cp), "meta": "Acompanhamento"},
-        {"label": "Itens / Boleto (IPB)", "valor": f"{ipb_cp:.2f}".replace('.', ',') if pd.notna(ipb_cp) else "-", "meta": "≥ 2,50", "atingido": bool(ipb_cp >= 2.5) if pd.notna(ipb_cp) else None},
-        {"label": "% Bol. Turbinado", "valor": fmt_pct(bt_cp, 2), "meta": "≥ 31,00%", "atingido": bool(bt_cp >= 0.31) if pd.notna(bt_cp) else None},
-        {"label": "% Bol. Promocional", "valor": fmt_pct(bp_cp, 2), "meta": "≥ 33,00%", "atingido": bool(bp_cp >= 0.33) if pd.notna(bp_cp) else None},
-        {"label": "% Resgate Fidelidade", "valor": fmt_pct(resg_cp, 2), "meta": "≥ 52,00%", "atingido": bool(resg_cp >= 0.52) if pd.notna(resg_cp) else None},
-        {"label": "% Ação de Fluxo", "valor": fmt_pct(fluxo_cp, 2), "meta": "≥ 28,00%", "atingido": bool(fluxo_cp >= 0.28) if pd.notna(fluxo_cp) else None},
+        {"label": "Ticket Médio (CP)", "valor": fmt_brl(tm_cp), "meta": "Acompanhamento", "delta": delta_tm_html},
+        {"label": "Itens / Boleto (IPB)", "valor": f"{ipb_cp:.2f}".replace('.', ',') if pd.notna(ipb_cp) else "-", "meta": "≥ 2,50", "atingido": bool(ipb_cp >= 2.5) if pd.notna(ipb_cp) else None, "delta": delta_ipb_html},
+        {"label": "% Bol. Turbinado", "valor": fmt_pct(bt_cp, 2), "meta": "≥ 31,00%", "atingido": bool(bt_cp >= 0.31) if pd.notna(bt_cp) else None, "delta": delta_bt_html},
+        {"label": "% Bol. Promocional", "valor": fmt_pct(bp_cp, 2), "meta": "≥ 33,00%", "atingido": bool(bp_cp >= 0.33) if pd.notna(bp_cp) else None, "delta": delta_bp_html},
+        {"label": "% Resgate Fidelidade", "valor": fmt_pct(resg_cp, 2), "meta": "≥ 52,00%", "atingido": bool(resg_cp >= 0.52) if pd.notna(resg_cp) else None, "delta": delta_resg_html},
+        {"label": "% Ação de Fluxo", "valor": fmt_pct(fluxo_cp, 2), "meta": "≥ 28,00%", "atingido": bool(fluxo_cp >= 0.28) if pd.notna(fluxo_cp) else None, "delta": delta_fluxo_html},
     ])
 
     dff = df[df["pdv"].isin(TARGET_PDVS)].copy()
@@ -857,19 +959,28 @@ def render_tab_indicadores(df: pd.DataFrame, consultant_df: Optional[pd.DataFram
 
     render_html("<h4 style='color: #0F172A; font-weight: 700; margin-top: 14px;'>Desempenho dos 9 PDVs (Painel de Alavancas)</h4>")
     dff_table = dff.sort_values("ticket_medio", ascending=False).copy()
+    delta_ipb_col = _delta_col_for_pdv(deltas_pdv, dff_table, "itens_boleto", fmt_type="dec")
+    delta_bt_col = _delta_col_for_pdv(deltas_pdv, dff_table, "boletos_turbinados", fmt_type="pct")
+    delta_resg_col = _delta_col_for_pdv(deltas_pdv, dff_table, "resgate_fidelidade", fmt_type="pct")
 
     dff_show = pd.DataFrame({
         "Loja": dff_table["label"],
         "Ticket Médio (R$)": dff_table["ticket_medio"].apply(fmt_brl),
         "Itens/Boleto": dff_table["itens_boleto"].apply(lambda x: f"{x:.2f}".replace('.', ',') if pd.notna(x) else "-"),
-        "% Bol. Turbinado": dff_table["boletos_turbinados"].apply(lambda x: fmt_pct(x, 2)),
-        "% Bol. Promocional": dff_table["boletos_promocionais"].apply(lambda x: fmt_pct(x, 2)),
-        "% Resgate Fidelidade": dff_table["resgate_fidelidade"].apply(lambda x: fmt_pct(x, 2)),
-        "% Ação de Fluxo": dff_table["conversao_acao_fluxo"].apply(lambda x: fmt_pct(x, 2)),
-        "% Boletos 1": dff_table["boletos_1"].apply(lambda x: fmt_pct(x, 2)),
-        "% Pen. Fidelidade": dff_table["penetracao_fidelidade"].apply(lambda x: fmt_pct(x, 2)),
-        "Serviços em Loja": dff_table.get("servicos_loja", pd.Series(np.zeros(len(dff_table)))).fillna(0).astype(int),
     })
+    if delta_ipb_col is not None:
+        dff_show["Δ IPB"] = delta_ipb_col.values
+    dff_show["% Bol. Turbinado"] = dff_table["boletos_turbinados"].apply(lambda x: fmt_pct(x, 2))
+    if delta_bt_col is not None:
+        dff_show["Δ Turb."] = delta_bt_col.values
+    dff_show["% Bol. Promocional"] = dff_table["boletos_promocionais"].apply(lambda x: fmt_pct(x, 2))
+    dff_show["% Resgate Fidelidade"] = dff_table["resgate_fidelidade"].apply(lambda x: fmt_pct(x, 2))
+    if delta_resg_col is not None:
+        dff_show["Δ Resgate"] = delta_resg_col.values
+    dff_show["% Ação de Fluxo"] = dff_table["conversao_acao_fluxo"].apply(lambda x: fmt_pct(x, 2))
+    dff_show["% Boletos 1"] = dff_table["boletos_1"].apply(lambda x: fmt_pct(x, 2))
+    dff_show["% Pen. Fidelidade"] = dff_table["penetracao_fidelidade"].apply(lambda x: fmt_pct(x, 2))
+    dff_show["Serviços em Loja"] = dff_table.get("servicos_loja", pd.Series(np.zeros(len(dff_table)))).fillna(0).astype(int)
 
     def rule_ipb(val):
         if not isinstance(val, str): return ''
@@ -961,6 +1072,7 @@ def render_tab_receita(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] =
     render_html("<p style='color: #475569; font-size: 13px; margin-bottom: 12px;'><b>Métricas:</b> Receita GMV | % Meta PEF (Vermelho se < 100%) | Vs. Período Anterior</p>")
 
     cp_info = calculators.get_cp_summary(data_raw) if data_raw else {}
+    deltas_cp, deltas_pdv = _get_deltas(data_raw)
     
     rec_cp = cp_info.get("receita_total_gmv")
     if pd.isna(rec_cp): rec_cp = df["receita"].sum()
@@ -972,17 +1084,22 @@ def render_tab_receita(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] =
     if pd.isna(pef_cp):
         pef_cp = (rec_cp / meta_pef_cp) if (pd.notna(meta_pef_cp) and meta_pef_cp > 0) else df["meta_pef_realizado"].mean()
 
+    delta_rec_html = format_delta(deltas_cp.get("receita_total_gmv"), "brl") if deltas_cp.get("receita_total_gmv") is not None else ""
+    delta_pef_html = format_delta(deltas_cp.get("meta_pef_atingimento"), "pct") if deltas_cp.get("meta_pef_atingimento") is not None else ""
+
     render_kpis([
         {
             "label": "Receita Total da Rede (GMV)",
             "valor": fmt_brl(rec_cp),
             "meta": f"Meta PEF: {fmt_brl(meta_pef_cp)}" if pd.notna(meta_pef_cp) else "Acompanhamento",
+            "delta": delta_rec_html,
         },
         {
             "label": "Atingimento Médio Meta PEF",
             "valor": fmt_pct(pef_cp, 2),
             "meta": "≥ 100,00%",
             "atingido": bool(pef_cp >= 1.00) if pd.notna(pef_cp) else None,
+            "delta": delta_pef_html,
         },
     ])
 
@@ -999,6 +1116,8 @@ def render_tab_receita(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] =
 
     render_html("<h4 style='color: #0F172A; font-weight: 700; margin-top: 14px;'>Desempenho Financeiro dos 9 PDVs</h4>")
     dff_table = dff.sort_values("receita", ascending=False).copy()
+    delta_rec_col = _delta_col_for_pdv(deltas_pdv, dff_table, "receita", fmt_type="brl")
+    delta_pef_col = _delta_col_for_pdv(deltas_pdv, dff_table, "meta_pef_realizado", fmt_type="pct")
 
     dff_show = pd.DataFrame({
         "Loja": dff_table["label"],
@@ -1006,12 +1125,16 @@ def render_tab_receita(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] =
         "Receita Loja (R$)": dff_table["receita_loja"].fillna(dff_table["receita"]).apply(fmt_brl),
         "Receita C&R (R$)": dff_table["receita_cr"].fillna(0).apply(fmt_brl),
         "Receita Total GMV (R$)": dff_table["receita"].apply(fmt_brl),
-        "Meta PEF (R$)": dff_table["meta_pef_total"].fillna(dff_table["meta_pef_loja"]).apply(fmt_brl),
-        "Gap Acordado (R$)": dff_table["gap_pef"].apply(fmt_brl),
-        "% Meta PEF": dff_table["meta_pef_realizado"].apply(lambda x: fmt_pct(x, 2)),
-        "Share na Rede": dff_table["representatividade"].apply(lambda x: fmt_pct(x, 2)),
-        "Vs. Ano Anterior": dff_table["receita_vs_anterior"].apply(lambda x: fmt_pct(x, 2)),
     })
+    if delta_rec_col is not None:
+        dff_show["Δ GMV Mês Ant."] = delta_rec_col.values
+    dff_show["Meta PEF (R$)"] = dff_table["meta_pef_total"].fillna(dff_table["meta_pef_loja"]).apply(fmt_brl)
+    dff_show["Gap Acordado (R$)"] = dff_table["gap_pef"].apply(fmt_brl)
+    dff_show["% Meta PEF"] = dff_table["meta_pef_realizado"].apply(lambda x: fmt_pct(x, 2))
+    if delta_pef_col is not None:
+        dff_show["Δ PEF Mês Ant."] = delta_pef_col.values
+    dff_show["Share na Rede"] = dff_table["representatividade"].apply(lambda x: fmt_pct(x, 2))
+    dff_show["Vs. Ano Anterior"] = dff_table["receita_vs_anterior"].apply(lambda x: fmt_pct(x, 2))
 
     def rule_pef(val):
         if not isinstance(val, str): return ''
@@ -1125,11 +1248,18 @@ def render_tab_resumo(df: pd.DataFrame, data_raw: Optional[Dict[str, Any]] = Non
 
     render_html("<h4 style='color: #004225; font-weight: 800; margin-top: 18px; margin-bottom: 8px;'>📊 Matriz de Diagnóstico Executivo (Scorecard das 12 Metas)</h4>")
     
+    deltas_cp, deltas_pdv = _get_deltas(data_raw)
+    delta_score_col = _delta_col_for_pdv(deltas_pdv, dff_sorted, "score_global", fmt_type="pts")
+
     scorecard_rows = []
-    for _, r in dff_sorted.iterrows():
-        scorecard_rows.append({
+    for idx, (_, r) in enumerate(dff_sorted.iterrows()):
+        row_dict = {
             "Loja": r["label"],
             "Score": f"{int(r['score_global'])} pts",
+        }
+        if delta_score_col is not None and idx < len(delta_score_col):
+            row_dict["Δ Score"] = delta_score_col.iloc[idx]
+        row_dict.update({
             "PEF (≥100%)": "✅" if pd.notna(r.get("meta_pef_realizado")) and r["meta_pef_realizado"] >= 1.00 else "❌",
             "NPS (≥90.9%)": "✅" if pd.notna(r.get("nps")) and r["nps"] >= 90.9 else "❌",
             "TME (≤7min)": "✅" if pd.notna(r.get("tme_ajustado_segundos")) and r["tme_ajustado_segundos"] <= 420 else "❌",
@@ -1143,6 +1273,7 @@ def render_tab_resumo(df: pd.DataFrame, data_raw: Optional[Dict[str, Any]] = Non
             "Promocional (≥33%)": "✅" if pd.notna(r.get("boletos_promocionais")) and r["boletos_promocionais"] >= 0.33 else "❌",
             "Resgate (≥52%)": "✅" if pd.notna(r.get("resgate_fidelidade")) and r["resgate_fidelidade"] >= 0.52 else "❌",
         })
+        scorecard_rows.append(row_dict)
 
     df_scorecard = pd.DataFrame(scorecard_rows)
     st.dataframe(style_table(df_scorecard), use_container_width=True, hide_index=True)
@@ -1243,6 +1374,14 @@ def render_tab_consulta_universal(df: pd.DataFrame, consultant_df: Optional[pd.D
             if loja_sel:
                 row = dff[dff["label"] == loja_sel].iloc[0]
                 st.markdown(f"#### Resultados e Metas: **{loja_sel}** ({row.get('cidade', '')})")
+
+                deltas_cp, deltas_pdv = _get_deltas(data_raw)
+                pdv_code = row.get("pdv")
+                d_row = {}
+                if not deltas_pdv.empty and "pdv" in deltas_pdv.columns:
+                    match_d = deltas_pdv[deltas_pdv["pdv"] == pdv_code]
+                    if not match_d.empty:
+                        d_row = match_d.iloc[0].to_dict()
                 
                 nps_v = row.get("nps", 0)
                 tme_s = row.get("tme_ajustado_segundos", 999)
@@ -1258,20 +1397,20 @@ def render_tab_consulta_universal(df: pd.DataFrame, consultant_df: Optional[pd.D
                 pef_v = row.get("meta_pef_realizado", 0)
 
                 render_kpis([
-                    {"label": "NPS (Loja)", "valor": f"{nps_v:.1f}%".replace('.', ',') if pd.notna(nps_v) else "-", "meta": "≥ 90,90%", "atingido": bool(pd.notna(nps_v) and nps_v >= 90.9)},
-                    {"label": "TME (Loja Digital)", "valor": str(row.get("tme_ajustado", "-")), "meta": "≤ 00:07:00", "atingido": bool(pd.notna(tme_s) and tme_s <= 420)},
-                    {"label": "Conv. Digital", "valor": fmt_pct(conv_v, 2), "meta": "≥ 10,00%", "atingido": bool(pd.notna(conv_v) and conv_v >= 0.10)},
-                    {"label": "% ID Cliente (CPF)", "valor": fmt_pct(cpf_v, 2), "meta": "≥ 115,00%", "atingido": bool(pd.notna(cpf_v) and cpf_v >= 1.15)},
-                    {"label": "% Boletos < 2 min", "valor": fmt_pct(b2m_v, 2), "meta": "≤ 30,00%", "atingido": bool(pd.notna(b2m_v) and b2m_v <= 0.30)},
-                    {"label": "Desafio Fidelidade", "valor": fmt_pct(fid_v, 2), "meta": "≥ 20,00%", "atingido": bool(pd.notna(fid_v) and fid_v >= 0.20)},
+                    {"label": "NPS (Loja)", "valor": f"{nps_v:.1f}%".replace('.', ',') if pd.notna(nps_v) else "-", "meta": "≥ 90,90%", "atingido": bool(pd.notna(nps_v) and nps_v >= 90.9), "delta": format_delta(d_row.get("delta_nps"), "pts")},
+                    {"label": "TME (Loja Digital)", "valor": str(row.get("tme_ajustado", "-")), "meta": "≤ 00:07:00", "atingido": bool(pd.notna(tme_s) and tme_s <= 420), "delta": format_delta(d_row.get("delta_tme_ajustado_segundos"), "time", inverted=True)},
+                    {"label": "Conv. Digital", "valor": fmt_pct(conv_v, 2), "meta": "≥ 10,00%", "atingido": bool(pd.notna(conv_v) and conv_v >= 0.10), "delta": format_delta(d_row.get("delta_conversao_digital"), "pct")},
+                    {"label": "% ID Cliente (CPF)", "valor": fmt_pct(cpf_v, 2), "meta": "≥ 115,00%", "atingido": bool(pd.notna(cpf_v) and cpf_v >= 1.15), "delta": format_delta(d_row.get("delta_id_cliente_cpf"), "pct")},
+                    {"label": "% Boletos < 2 min", "valor": fmt_pct(b2m_v, 2), "meta": "≤ 30,00%", "atingido": bool(pd.notna(b2m_v) and b2m_v <= 0.30), "delta": format_delta(d_row.get("delta_id_cliente_2min"), "pct", inverted=True)},
+                    {"label": "Desafio Fidelidade", "valor": fmt_pct(fid_v, 2), "meta": "≥ 20,00%", "atingido": bool(pd.notna(fid_v) and fid_v >= 0.20), "delta": format_delta(d_row.get("delta_penetracao_desafio_fidelidade"), "pct")},
                 ])
                 render_kpis([
-                    {"label": "Share Skin (Botik)", "valor": fmt_pct(skin_v, 2), "meta": "≥ 2,10%", "atingido": bool(pd.notna(skin_v) and skin_v >= 0.021)},
-                    {"label": "Itens por Boleto", "valor": f"{ipb_v:.2f}".replace('.', ',') if pd.notna(ipb_v) else "-", "meta": "≥ 2,50", "atingido": bool(pd.notna(ipb_v) and ipb_v >= 2.50)},
-                    {"label": "% Boleto Turbinado", "valor": fmt_pct(bt_v, 2), "meta": "≥ 31,00%", "atingido": bool(pd.notna(bt_v) and bt_v >= 0.31)},
-                    {"label": "% Boleto Promocional", "valor": fmt_pct(bp_v, 2), "meta": "≥ 33,00%", "atingido": bool(pd.notna(bp_v) and bp_v >= 0.33)},
-                    {"label": "% Resgate Fidelidade", "valor": fmt_pct(resg_v, 2), "meta": "≥ 52,00%", "atingido": bool(pd.notna(resg_v) and resg_v >= 0.52)},
-                    {"label": "Atingimento PEF", "valor": fmt_pct(pef_v, 2), "meta": "≥ 100,00%", "atingido": bool(pd.notna(pef_v) and pef_v >= 1.00)},
+                    {"label": "Share Skin (Botik)", "valor": fmt_pct(skin_v, 2), "meta": "≥ 2,10%", "atingido": bool(pd.notna(skin_v) and skin_v >= 0.021), "delta": format_delta(d_row.get("delta_cuidados_faciais"), "pct")},
+                    {"label": "Itens por Boleto", "valor": f"{ipb_v:.2f}".replace('.', ',') if pd.notna(ipb_v) else "-", "meta": "≥ 2,50", "atingido": bool(pd.notna(ipb_v) and ipb_v >= 2.50), "delta": format_delta(d_row.get("delta_itens_boleto"), "dec")},
+                    {"label": "% Boleto Turbinado", "valor": fmt_pct(bt_v, 2), "meta": "≥ 31,00%", "atingido": bool(pd.notna(bt_v) and bt_v >= 0.31), "delta": format_delta(d_row.get("delta_boletos_turbinados"), "pct")},
+                    {"label": "% Boleto Promocional", "valor": fmt_pct(bp_v, 2), "meta": "≥ 33,00%", "atingido": bool(pd.notna(bp_v) and bp_v >= 0.33), "delta": format_delta(d_row.get("delta_boletos_promocionais"), "pct")},
+                    {"label": "% Resgate Fidelidade", "valor": fmt_pct(resg_v, 2), "meta": "≥ 52,00%", "atingido": bool(pd.notna(resg_v) and resg_v >= 0.52), "delta": format_delta(d_row.get("delta_resgate_fidelidade"), "pct")},
+                    {"label": "Atingimento PEF", "valor": fmt_pct(pef_v, 2), "meta": "≥ 100,00%", "atingido": bool(pd.notna(pef_v) and pef_v >= 1.00), "delta": format_delta(d_row.get("delta_meta_pef_realizado"), "pct")},
                 ])
                 
                 # Consultoras da loja

@@ -594,9 +594,12 @@ def render_tab_idcliente(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame]
     cdf = filter_consultants(cdf, excluir_gerencia, busca_consultora)
     
     if not cdf.empty:
-        req_cols = ["Loja", "CONSULTOR", "% Atendimentos com CPF (IAF 2026)", "% BOLETOS ID CLIENTE TMA CPF ABAIXO DE 2MIN", "TEMPO MÉDIO DE ATENDIMENTO (TMA CPF)", "TOTAL BOLETOS"]
+        col_cons = next((c for c in ["CONSULTOR", "Consultor", "CONSULTOR(A)", "Nome"] if c in cdf.columns), "CONSULTOR")
+        req_cols = ["Loja", col_cons, "% Atendimentos com CPF (IAF 2026)", "% BOLETOS ID CLIENTE TMA CPF ABAIXO DE 2MIN", "TEMPO MÉDIO DE ATENDIMENTO (TMA CPF)", "TOTAL BOLETOS"]
         avail = [c for c in req_cols if c in cdf.columns]
         c_show = cdf[avail].copy()
+        if col_cons in c_show.columns and col_cons != "Consultora":
+            c_show = c_show.rename(columns={col_cons: "Consultora"})
         if "% Atendimentos com CPF (IAF 2026)" in c_show.columns:
             c_show["% Atendimentos com CPF (IAF 2026)"] = c_show["% Atendimentos com CPF (IAF 2026)"].apply(lambda x: fmt_pct(x, 2))
         if "% BOLETOS ID CLIENTE TMA CPF ABAIXO DE 2MIN" in c_show.columns:
@@ -767,9 +770,16 @@ def render_tab_skin(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = No
     cdf = filter_consultants(cdf, excluir_gerencia, busca_consultora)
     
     if not cdf.empty:
-        req_cols = ["Loja", "CONSULTOR", "(%) RECEITA", "RECEITA (R$)"]
+        col_cons = next((c for c in ["Consultor", "CONSULTOR", "CONSULTOR(A)", "Nome"] if c in cdf.columns), None)
+        req_cols = ["Loja"]
+        if col_cons:
+            req_cols.append(col_cons)
+        req_cols.extend(["(%) RECEITA", "RECEITA (R$)"])
         avail = [c for c in req_cols if c in cdf.columns]
         c_show = cdf[avail].copy()
+        
+        if col_cons and col_cons in c_show.columns and col_cons != "Consultora":
+            c_show = c_show.rename(columns={col_cons: "Consultora"})
         
         if "(%) RECEITA" in c_show.columns:
             c_show["(%) RECEITA"] = c_show["(%) RECEITA"].apply(lambda x: fmt_pct(x, 2))

@@ -793,11 +793,11 @@ def render_tab_fidelidade(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame
 # ═══════════════════════════════════════════════════════════════════
 
 def render_tab_skin(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = None, data_raw: Optional[Dict[str, Any]] = None, excluir_gerencia: bool = True, busca_consultora: str = ""):
-    render_html("<h2 style='color: #004225; font-weight: 800; margin-bottom: 2px;'>5. Skin + Categorias (Cuidados Faciais, Perfumaria e Mix)</h2>")
-    render_header_badges(pilar="Gestão Comercial & Categorias", pontos="25 Pontos IAF + Mix Comercial", classificacao="Oficial & Estratégico")
+    render_html("<h2 style='color: #004225; font-weight: 800; margin-bottom: 2px;'>5. Skin + Categorias (Cuidados Faciais e Perfumaria)</h2>")
+    render_header_badges(pilar="Gestão Comercial & Categorias", pontos="25 Pontos IAF + Perfumaria", classificacao="Oficial & Estratégico")
     render_executive_description(
-        "Painel integrado de gestão de categorias da franquia Korinthos Cosméticos: acompanhamento do indicador oficial de Skin (Cuidados Faciais + Botik - IAF 2026), "
-        "monitoramento estratégico da categoria de Perfumaria e distribuição do mix de faturamento por unidade."
+        "Painel integrado de categorias da franquia Korinthos Cosméticos: acompanhamento do indicador oficial de Skin (Cuidados Faciais + Botik - IAF 2026) "
+        "e monitoramento estratégico da categoria de Perfumaria (Meta: ≥ 50,00%)."
     )
 
     cp_info = calculators.get_cp_summary(data_raw) if data_raw else {}
@@ -807,7 +807,7 @@ def render_tab_skin(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = No
     # ─────────────────────────────────────────────────────────────
     # SEÇÃO 1: CUIDADOS FACIAIS & BOTIK (SKIN LOJAS — IAF 2026)
     # ─────────────────────────────────────────────────────────────
-    render_html("<h3 style='color: #004225; font-weight: 800; border-bottom: 2px solid #E2E8F0; padding-bottom: 6px; margin-top: 20px;'>🌿 1. Cuidados Faciais & Botik (Meta Oficial IAF 2026)</h3>")
+    render_html("<h3 style='color: #004225; font-weight: 800; border-bottom: 2px solid #E2E8F0; padding-bottom: 6px; margin-top: 20px;'>1. Cuidados Faciais & Botik (Meta Oficial IAF 2026)</h3>")
     render_html("<p style='color: #475569; font-size: 13px; margin-bottom: 12px;'>Mede o Share (%) de Receita GMV proveniente da marca Botik e da categoria de Cuidados Faciais dentro do canal Loja (Meta Regional SP: ≥ 2,10%).</p>")
 
     delta_skin = deltas_cp.get("skin_share")
@@ -874,26 +874,26 @@ def render_tab_skin(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = No
 
     st.dataframe(style_table(dff_show, {"% Share Skin": rule_skin}), use_container_width=True, hide_index=True)
 
-    with st.expander("👩‍💼 Resultados por Consultora (Cuidados Faciais + Botik)", expanded=False):
-        cdf = calculators.get_consultant_data_for_tab(data_raw, "cuidados_faciais") if data_raw else pd.DataFrame()
-        cdf = filter_consultants(cdf, excluir_gerencia, busca_consultora)
-        if not cdf.empty:
-            col_cons = next((c for c in ["Consultor", "CONSULTOR", "CONSULTOR(A)", "Nome"] if c in cdf.columns), None)
-            req_cols = ["Loja"]
-            if col_cons:
-                req_cols.append(col_cons)
-            req_cols.extend(["(%) RECEITA", "RECEITA (R$)"])
-            avail = [c for c in req_cols if c in cdf.columns]
-            c_show = cdf[avail].copy()
-            if col_cons and col_cons in c_show.columns and col_cons != "Consultora":
-                c_show = c_show.rename(columns={col_cons: "Consultora"})
-            if "(%) RECEITA" in c_show.columns:
-                c_show["(%) RECEITA"] = c_show["(%) RECEITA"].apply(lambda x: fmt_pct(x, 2))
-            if "RECEITA (R$)" in c_show.columns:
-                c_show["RECEITA (R$)"] = c_show["RECEITA (R$)"].apply(fmt_brl)
-            st.dataframe(style_table(c_show, {"(%) RECEITA": rule_skin}), use_container_width=True, hide_index=True)
-        else:
-            st.info("Nenhuma consultora encontrada.")
+    render_html("<h4 style='color: #0F172A; font-weight: 700; margin-top: 20px;'>Resultados por Consultora — Cuidados Faciais</h4>")
+    cdf = calculators.get_consultant_data_for_tab(data_raw, "cuidados_faciais") if data_raw else pd.DataFrame()
+    cdf = filter_consultants(cdf, excluir_gerencia, busca_consultora)
+    if not cdf.empty:
+        col_cons = next((c for c in ["Consultor", "CONSULTOR", "CONSULTOR(A)", "Nome"] if c in cdf.columns), None)
+        req_cols = ["Loja"]
+        if col_cons:
+            req_cols.append(col_cons)
+        req_cols.extend(["(%) RECEITA", "RECEITA (R$)"])
+        avail = [c for c in req_cols if c in cdf.columns]
+        c_show = cdf[avail].copy()
+        if col_cons and col_cons in c_show.columns and col_cons != "Consultora":
+            c_show = c_show.rename(columns={col_cons: "Consultora"})
+        if "(%) RECEITA" in c_show.columns:
+            c_show["(%) RECEITA"] = c_show["(%) RECEITA"].apply(lambda x: fmt_pct(x, 2))
+        if "RECEITA (R$)" in c_show.columns:
+            c_show["RECEITA (R$)"] = c_show["RECEITA (R$)"].apply(fmt_brl)
+        st.dataframe(style_table(c_show, {"(%) RECEITA": rule_skin}), use_container_width=True, hide_index=True)
+    else:
+        st.info("Nenhuma consultora encontrada.")
 
     render_iaf_expander(
         titulo="Skin Lojas (Cuidados Faciais + Botik)",
@@ -906,8 +906,8 @@ def render_tab_skin(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = No
     # ─────────────────────────────────────────────────────────────
     # SEÇÃO 2: PERFUMARIA — RECEITA E PARTICIPAÇÃO (%)
     # ─────────────────────────────────────────────────────────────
-    render_html("<h3 style='color: #004225; font-weight: 800; border-bottom: 2px solid #E2E8F0; padding-bottom: 6px; margin-top: 36px;'>💐 2. Perfumaria — Receita e Participação</h3>")
-    render_html("<p style='color: #475569; font-size: 13px; margin-bottom: 12px;'>Acompanhamento da principal categoria da rede. A meta de referência operacional é manter a participação de Perfumaria em <b>≥ 50,00%</b> da receita do PDV.</p>")
+    render_html("<h3 style='color: #004225; font-weight: 800; border-bottom: 2px solid #E2E8F0; padding-bottom: 6px; margin-top: 36px;'>2. Perfumaria — Receita e Participação</h3>")
+    render_html("<p style='color: #475569; font-size: 13px; margin-bottom: 12px;'>Acompanhamento da principal categoria da rede. A meta de participação de Perfumaria é <b>50,00%</b> da receita do PDV.</p>")
 
     rec_perf_cp = cp_info.get("receita_perfumaria_cp")
     if pd.isna(rec_perf_cp) or rec_perf_cp is None:
@@ -935,14 +935,14 @@ def render_tab_skin(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = No
         {
             "label": "Participação Perfumaria no CP",
             "valor": fmt_pct(part_perf_cp, 2),
-            "meta": "≥ 50,00%",
+            "meta": "Meta: ≥ 50,00%",
             "atingido": bool(part_perf_cp >= 0.50) if pd.notna(part_perf_cp) else None,
             "delta": delta_perf_part_html,
         },
         {
             "label": "Lojas na Meta de Perfumaria",
             "valor": f"{lojas_meta_perf} de 9 Lojas",
-            "meta": "≥ 50,00%",
+            "meta": "Meta: ≥ 50,00%",
             "atingido": bool(lojas_meta_perf >= 5),
         }
     ])
@@ -951,7 +951,7 @@ def render_tab_skin(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = No
         dff_perf_chart = dff.dropna(subset=["participacao_perfumaria"]).sort_values("participacao_perfumaria", ascending=False)
         fig_perf = px.bar(
             dff_perf_chart, x="label", y="participacao_perfumaria", text_auto=".2%",
-            title="Participação da Categoria de Perfumaria por Loja",
+            title="Participação da Categoria de Perfumaria por Loja (Meta: 50,00%)",
             color_discrete_sequence=["#004225"]
         )
         fig_perf = apply_chart_theme(fig_perf, y_format=".2%", target_line=0.50, target_label="Meta (50,00%)", target_color="#DC2626", line_width=2.5)
@@ -972,184 +972,52 @@ def render_tab_skin(df: pd.DataFrame, consultant_df: Optional[pd.DataFrame] = No
         if delta_perf_col is not None:
             dff_perf_show["Δ Mês Ant."] = delta_perf_col.values
         dff_perf_show["Gap p/ Meta (50,00%)"] = dff_perf_table["participacao_perfumaria"].apply(lambda x: f"{x - 0.50:+.2%}".replace('.', ',') if pd.notna(x) else "-")
-        dff_perf_show["Status"] = dff_perf_table["participacao_perfumaria"].apply(lambda x: "✅ Atingida" if pd.notna(x) and x >= 0.50 else "❌ Abaixo")
+        dff_perf_show["Status"] = dff_perf_table["participacao_perfumaria"].apply(lambda x: "✅ Na Meta (≥ 50%)" if pd.notna(x) and x >= 0.50 else "❌ Abaixo (< 50%)")
 
-        # Regra de destaque: valores abaixo de 50% em vermelho, conforme solicitação do usuário
         def rule_perf(val):
             if not isinstance(val, str): return ''
             try:
                 num = float(val.replace('%', '').replace(',', '.'))
-                return 'color: #DC2626; font-weight: 700;' if num < 50.0 else 'color: #004225; font-weight: 700;'
+                return 'color: #DC2626; font-weight: 700;' if num < 50.0 else 'color: #059669; font-weight: 700;'
             except: return ''
 
         st.dataframe(style_table(dff_perf_show, {"Participação (%)": rule_perf}), use_container_width=True, hide_index=True)
 
-        # Card de Total CP consolidado ao final da tabela (igual ao modelo visual do usuário)
         render_html(f"""
-        <div style="background-color: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 8px; padding: 12px 18px; margin-top: 10px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+        <div style="background-color: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 8px; padding: 12px 18px; margin-top: 10px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
             <div style="font-weight: 800; color: #004225; font-size: 15px;">Total CP Korinthos (10063)</div>
             <div style="font-weight: 700; color: #0F172A; font-size: 14px;">Receita Perfumaria: <b>{fmt_brl(rec_perf_cp)}</b></div>
-            <div style="font-weight: 800; font-size: 15px; color: {'#004225' if pd.notna(part_perf_cp) and part_perf_cp >= 0.50 else '#DC2626'};">
-                Participação Geral CP: <b>{fmt_pct(part_perf_cp, 2)}</b>
+            <div style="font-weight: 800; font-size: 15px; color: {'#059669' if pd.notna(part_perf_cp) and part_perf_cp >= 0.50 else '#DC2626'};">
+                Participação Geral CP: <b>{fmt_pct(part_perf_cp, 2)}</b> (Meta: ≥ 50,00%)
             </div>
         </div>
         """)
 
-    with st.expander("👩‍💼 Desempenho por Consultora em Perfumaria", expanded=False):
-        cdf_p = calculators.get_consultant_data_for_tab(data_raw, "perfumaria") if data_raw else pd.DataFrame()
-        cdf_p = filter_consultants(cdf_p, excluir_gerencia, busca_consultora)
-        if not cdf_p.empty and "perfumaria_receita" in cdf_p.columns:
-            cdf_p_sorted = cdf_p.sort_values("perfumaria_receita", ascending=False).copy()
-            c_perf_show = pd.DataFrame({
-                "Consultora": cdf_p_sorted["Consultor"],
-                "Loja": cdf_p_sorted.get("Loja", "Rede CP"),
-                "Receita Perfumaria (R$)": cdf_p_sorted["perfumaria_receita"].apply(fmt_brl),
-                "Participação (%)": cdf_p_sorted["perfumaria_part"].apply(lambda x: fmt_pct(x, 2)),
-                "Total Receita (R$)": cdf_p_sorted["total_receita"].apply(fmt_brl),
-            })
-            st.dataframe(style_table(c_perf_show, {"Participação (%)": rule_perf}), use_container_width=True, hide_index=True)
-        else:
-            st.info("Nenhum dado de consultora de perfumaria disponível.")
-
-    # ─────────────────────────────────────────────────────────────
-    # SEÇÃO 3: DISTRIBUIÇÃO DA RECEITA POR CATEGORIA (MIX COMPLETO)
-    # ─────────────────────────────────────────────────────────────
-    render_html("<h3 style='color: #004225; font-weight: 800; border-bottom: 2px solid #E2E8F0; padding-bottom: 6px; margin-top: 36px;'>📊 3. Distribuição Geral da Receita por Categoria</h3>")
-    render_html("<p style='color: #475569; font-size: 13px; margin-bottom: 14px;'>Composição percentual e financeira do faturamento entre as 6 categorias de produtos: <b>Perfumaria, Cuidados da Pele, Cabelos, Maquiagem, Gifts e Outros</b>.</p>")
-
-    cat_cols_map = [
-        ("PERFUMARIA", "receita_perfumaria", "participacao_perfumaria", "#004225"),
-        ("OUTROS", "receita_outros", "participacao_outros", "#64748B"),
-        ("CUIDADOS DA PELE", "receita_cuidados_pele", "participacao_cuidados_pele", "#0DAB01"),
-        ("MAQUIAGEM", "receita_maquiagem", "participacao_maquiagem", "#D97706"),
-        ("CABELOS", "receita_cabelos", "participacao_cabelos", "#2563EB"),
-        ("GIFTS", "receita_gifts", "participacao_gifts", "#8B5CF6"),
-    ]
-
-    # Gráficos de Composição Lado a Lado
-    col_g1, col_g2 = st.columns([1, 1])
-
-    # 1. Gráfico de Rosca (Donut) do CP
-    with col_g1:
-        cp_cat = cp_info.get("categorias_cp", {})
-        donut_data = []
-        if cp_cat:
-            cat_keys = [
-                ("Perfumaria", "perfumaria_receita", "#004225"),
-                ("Outros", "outros_receita", "#64748B"),
-                ("Cuidados da Pele", "cuidados_pele_receita", "#0DAB01"),
-                ("Maquiagem", "maquiagem_receita", "#D97706"),
-                ("Cabelos", "cabelos_receita", "#2563EB"),
-                ("Gifts", "gifts_receita", "#8B5CF6"),
-            ]
-            for label_cat, key_cat, cor in cat_keys:
-                val = _safe_numeric(cp_cat.get(key_cat))
-                if pd.notna(val) and val > 0:
-                    donut_data.append({"Categoria": label_cat, "Receita": val, "Cor": cor})
-        elif "receita_perfumaria" in dff.columns:
-            for label_cat, col_cat, _, cor in cat_cols_map:
-                val = dff[col_cat].sum() if col_cat in dff.columns else 0
-                if val > 0:
-                    donut_data.append({"Categoria": label_cat.title(), "Receita": val, "Cor": cor})
-
-        if donut_data:
-            df_donut = pd.DataFrame(donut_data)
-            fig_donut = px.pie(
-                df_donut, names="Categoria", values="Receita", hole=0.55,
-                title="Mix de Categorias — CP Korinthos (Total)",
-                color="Categoria",
-                color_discrete_map={d["Categoria"]: d["Cor"] for d in donut_data}
-            )
-            fig_donut.update_traces(textposition='inside', textinfo='percent+label', marker=dict(line=dict(color='#FFFFFF', width=2)))
-            fig_donut.update_layout(
-                showlegend=False,
-                margin=dict(l=10, r=10, t=40, b=10),
-                annotations=[dict(text=f"Total CP<br><b>{fmt_brl(df_donut['Receita'].sum())}</b>", x=0.5, y=0.5, font_size=12, showarrow=False)]
-            )
-            st.plotly_chart(fig_donut, use_container_width=True)
-
-    # 2. Gráfico de Barras Empilhadas 100% por Loja
-    with col_g2:
-        stacked_rows = []
-        for _, r in dff.iterrows():
-            loja_label = r["label"]
-            for label_cat, _, part_col, cor in cat_cols_map:
-                pct = r.get(part_col, 0)
-                if pd.notna(pct):
-                    stacked_rows.append({
-                        "Loja": loja_label,
-                        "Categoria": label_cat.title(),
-                        "Participação": float(pct),
-                        "Cor": cor
-                    })
-        if stacked_rows:
-            df_stacked = pd.DataFrame(stacked_rows)
-            fig_stacked = px.bar(
-                df_stacked, x="Loja", y="Participação", color="Categoria",
-                title="Composição do Mix por Loja (100%)",
-                color_discrete_map={d["Categoria"]: d["Cor"] for d in stacked_rows}
-            )
-            fig_stacked.update_layout(
-                barmode='stack',
-                yaxis=dict(tickformat='.0%', title=""),
-                xaxis=dict(title=""),
-                margin=dict(l=10, r=10, t=40, b=10),
-                legend=dict(orientation="h", yanchor="bottom", y=-0.35, xanchor="center", x=0.5)
-            )
-            st.plotly_chart(fig_stacked, use_container_width=True)
-
-    # Tabela Matricial Completa de Categorias por Loja
-    render_html("<h4 style='color: #0F172A; font-weight: 700; margin-top: 16px;'>Matriz de Participação por Categoria (% e Receita)</h4>")
-    matriz_rows = []
-    for _, r in dff.iterrows():
-        matriz_rows.append({
-            "Loja": r["label"],
-            "Cidade": r["cidade"],
-            "Total Receita": fmt_brl(r.get("receita_total_categorias", r.get("receita"))),
-            "Perfumaria (%)": fmt_pct(r.get("participacao_perfumaria"), 2),
-            "Cuidados da Pele (%)": fmt_pct(r.get("participacao_cuidados_pele"), 2),
-            "Cabelos (%)": fmt_pct(r.get("participacao_cabelos"), 2),
-            "Maquiagem (%)": fmt_pct(r.get("participacao_maquiagem"), 2),
-            "Gifts (%)": fmt_pct(r.get("participacao_gifts"), 2),
-            "Outros (%)": fmt_pct(r.get("participacao_outros"), 2),
+    render_html("<h4 style='color: #0F172A; font-weight: 700; margin-top: 20px;'>Resultados por Consultora — Perfumaria</h4>")
+    cdf_p = calculators.get_consultant_data_for_tab(data_raw, "perfumaria") if data_raw else pd.DataFrame()
+    cdf_p = filter_consultants(cdf_p, excluir_gerencia, busca_consultora)
+    if not cdf_p.empty and "perfumaria_receita" in cdf_p.columns:
+        cdf_p_sorted = cdf_p.sort_values("perfumaria_receita", ascending=False).copy()
+        c_perf_show = pd.DataFrame({
+            "Consultora": cdf_p_sorted["Consultor"],
+            "Loja": cdf_p_sorted.get("Loja", "Rede CP"),
+            "Receita Perfumaria (R$)": cdf_p_sorted["perfumaria_receita"].apply(fmt_brl),
+            "Participação (%)": cdf_p_sorted["perfumaria_part"].apply(lambda x: fmt_pct(x, 2)),
+            "Status": cdf_p_sorted["perfumaria_part"].apply(lambda x: "✅ Na Meta (≥ 50%)" if pd.notna(x) and x >= 0.50 else "❌ Abaixo (< 50%)"),
+            "Total Receita (R$)": cdf_p_sorted["total_receita"].apply(fmt_brl),
         })
+        st.dataframe(style_table(c_perf_show, {"Participação (%)": rule_perf}), use_container_width=True, hide_index=True)
+    else:
+        st.info("Nenhum dado de consultora de perfumaria disponível.")
 
-    # Adicionar linha de Total CP
-    if cp_info.get("categorias_cp"):
-        cp_c = cp_info["categorias_cp"]
-        matriz_rows.append({
-            "Loja": "★ TOTAL CP KORINTHOS",
-            "Cidade": "Franquia",
-            "Total Receita": fmt_brl(cp_c.get("total_receita")),
-            "Perfumaria (%)": fmt_pct(cp_c.get("perfumaria_part"), 2),
-            "Cuidados da Pele (%)": fmt_pct(cp_c.get("cuidados_pele_part"), 2),
-            "Cabelos (%)": fmt_pct(cp_c.get("cabelos_part"), 2),
-            "Maquiagem (%)": fmt_pct(cp_c.get("maquiagem_part"), 2),
-            "Gifts (%)": fmt_pct(cp_c.get("gifts_part"), 2),
-            "Outros (%)": fmt_pct(cp_c.get("outros_part"), 2),
-        })
+    render_iaf_expander(
+        titulo="Perfumaria (Meta Operacional)",
+        formula="Participação Perfumaria (%) = Receita Perfumaria (R$) / Receita Total (R$).",
+        metas="• <b>Meta de Participação:</b> ≥ 50,00% da receita da loja.<br>• PDVs e consultoras com participação abaixo de 50,00% ficam destacados em vermelho.",
+        conduta_permitido="Apresentar os lançamentos e fragrâncias icônicas, aplicar fitas olfativas e incentivar a experimentação no salão de vendas.",
+        conduta_proibido="Vincular vendas de perfumaria a práticas que não correspondam à escolha autônoma do consumidor."
+    )
 
-    df_matriz = pd.DataFrame(matriz_rows)
-    st.dataframe(df_matriz, use_container_width=True, hide_index=True)
-
-    with st.expander("👩‍💼 Mix Completo por Consultora (Todas as Categorias)", expanded=False):
-        cdf_cat = calculators.get_consultant_data_for_tab(data_raw, "categorias") if data_raw else pd.DataFrame()
-        cdf_cat = filter_consultants(cdf_cat, excluir_gerencia, busca_consultora)
-        if not cdf_cat.empty:
-            c_matriz = pd.DataFrame({
-                "Consultora": cdf_cat["Consultor"],
-                "Loja": cdf_cat.get("Loja", "Rede CP"),
-                "Total Receita": cdf_cat["total_receita"].apply(fmt_brl),
-                "Perfumaria (%)": cdf_cat["perfumaria_part"].apply(lambda x: fmt_pct(x, 2)),
-                "Cuidados da Pele (%)": cdf_cat["cuidados_pele_part"].apply(lambda x: fmt_pct(x, 2)),
-                "Cabelos (%)": cdf_cat["cabelos_part"].apply(lambda x: fmt_pct(x, 2)),
-                "Maquiagem (%)": cdf_cat["maquiagem_part"].apply(lambda x: fmt_pct(x, 2)),
-                "Gifts (%)": cdf_cat["gifts_part"].apply(lambda x: fmt_pct(x, 2)),
-                "Outros (%)": cdf_cat["outros_part"].apply(lambda x: fmt_pct(x, 2)),
-            })
-            st.dataframe(c_matriz, use_container_width=True, hide_index=True)
-        else:
-            st.info("Nenhum dado de consultoras disponível para distribuição de categorias.")
 
 render_tab_skin_e_categorias = render_tab_skin
 

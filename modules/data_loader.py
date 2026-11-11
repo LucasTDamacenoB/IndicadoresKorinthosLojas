@@ -580,6 +580,7 @@ def discover_available_months(dados_dir: Optional[str] = None) -> List[Dict[str,
             continue
             
         entry_lower = entry.lower()
+        is_acumulado = "acumulado" in entry_lower
         month_num = None
         year = 2026
         
@@ -595,13 +596,18 @@ def discover_available_months(dados_dir: Optional[str] = None) -> List[Dict[str,
             if 1 <= n <= 12:
                 month_num = n
                 
-        # 3. Nome do mês em português
-        for m_name, m_val in MONTH_NAMES.items():
-            if m_name in entry_lower:
-                month_num = m_val
-                break
-                
-        if month_num is None:
+        # 3. Nome do mês em português (apenas se não for pasta de acumulado)
+        if not is_acumulado and month_num is None:
+            for m_name, m_val in MONTH_NAMES.items():
+                if m_name in entry_lower:
+                    month_num = m_val
+                    break
+                    
+        if is_acumulado:
+            month_num = 90
+            clean_sub = entry.replace("acumulado", "").replace("-", " ").replace("_", " ").strip()
+            label = f"Acumulado ({clean_sub.title()})" if clean_sub else "Acumulado"
+        elif month_num is None:
             month_num = 99
             label = entry
         else:

@@ -223,10 +223,15 @@ with st.sidebar:
     
     if available_months:
         month_labels = [m["label"] for m in available_months]
+        default_idx = len(month_labels) - 1
+        regular_indices = [i for i, m in enumerate(available_months) if m.get("month_num", 99) <= 12]
+        if regular_indices:
+            default_idx = regular_indices[-1]
+            
         selected_label = st.selectbox(
             "Mês de Referência:",
             options=month_labels,
-            index=len(month_labels) - 1,
+            index=default_idx,
             help="Selecione o mês desejado. O sistema identifica automaticamente o mês anterior para exibição das variações (deltas)."
         )
         curr_idx = month_labels.index(selected_label)

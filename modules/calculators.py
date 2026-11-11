@@ -95,6 +95,13 @@ def build_consolidated(data: Dict[str, Any]) -> pd.DataFrame:
         "tme_ajustado_segundos", "clientes_encaminhados", "clientes_atendidos",
         "clientes_convertidos", "conversao_digital",
         "servicos_loja", "clique_retire", "cuidados_faciais", "receita_skin",
+        "receita_perfumaria", "participacao_perfumaria",
+        "receita_cabelos", "participacao_cabelos",
+        "receita_cuidados_pele", "participacao_cuidados_pele",
+        "receita_gifts", "participacao_gifts",
+        "receita_maquiagem", "participacao_maquiagem",
+        "receita_outros", "participacao_outros",
+        "receita_total_categorias",
         "loja_digital_atendimento",
     ]
     for c in cols:
@@ -322,6 +329,29 @@ def build_consolidated(data: Dict[str, Any]) -> pd.DataFrame:
                 if pd.notna(registros):
                     df.loc[pdv, "nps_registros"] = registros
 
+    # 7.1 DISTRIBUIÇÃO DA RECEITA POR CATEGORIA (Perfumaria, Cabelos, Pele, etc.)
+    if config.FILE_TYPE_CATEGORIAS in data and data[config.FILE_TYPE_CATEGORIAS] is not None:
+        cat_data = data[config.FILE_TYPE_CATEGORIAS]
+        df_pdv_cat = cat_data.get("PDV") if isinstance(cat_data, dict) else None
+        if df_pdv_cat is not None and not df_pdv_cat.empty:
+            for _, r in df_pdv_cat.iterrows():
+                pdv = config.normalize_pdv(r.get("pdv"))
+                if pdv not in df.index:
+                    continue
+                df.loc[pdv, "receita_perfumaria"] = _safe_numeric(r.get("perfumaria_receita"))
+                df.loc[pdv, "participacao_perfumaria"] = _safe_numeric(r.get("perfumaria_part"))
+                df.loc[pdv, "receita_cabelos"] = _safe_numeric(r.get("cabelos_receita"))
+                df.loc[pdv, "participacao_cabelos"] = _safe_numeric(r.get("cabelos_part"))
+                df.loc[pdv, "receita_cuidados_pele"] = _safe_numeric(r.get("cuidados_pele_receita"))
+                df.loc[pdv, "participacao_cuidados_pele"] = _safe_numeric(r.get("cuidados_pele_part"))
+                df.loc[pdv, "receita_gifts"] = _safe_numeric(r.get("gifts_receita"))
+                df.loc[pdv, "participacao_gifts"] = _safe_numeric(r.get("gifts_part"))
+                df.loc[pdv, "receita_maquiagem"] = _safe_numeric(r.get("maquiagem_receita"))
+                df.loc[pdv, "participacao_maquiagem"] = _safe_numeric(r.get("maquiagem_part"))
+                df.loc[pdv, "receita_outros"] = _safe_numeric(r.get("outros_receita"))
+                df.loc[pdv, "participacao_outros"] = _safe_numeric(r.get("outros_part"))
+                df.loc[pdv, "receita_total_categorias"] = _safe_numeric(r.get("total_receita"))
+
     # 8. CÁLCULO DE SHARE E REPRESENTATIVIDADE
     total_rec = df["receita"].sum()
     if total_rec > 0:
@@ -540,6 +570,16 @@ def get_cp_summary(data: Dict[str, Any]) -> dict:
             if pd.notna(share_val): summary["skin_share"] = share_val
             if pd.notna(rec_skin_val): summary["receita_skin_cp"] = rec_skin_val
 
+    # 8. DISTRIBUIÇÃO DA RECEITA POR CATEGORIA (CP)
+    if config.FILE_TYPE_CATEGORIAS in data and data[config.FILE_TYPE_CATEGORIAS] is not None:
+        cat_data = data[config.FILE_TYPE_CATEGORIAS]
+        cp_cat = cat_data.get("CP") if isinstance(cat_data, dict) else None
+        if cp_cat:
+            summary["receita_perfumaria_cp"] = cp_cat.get("perfumaria_receita")
+            summary["participacao_perfumaria_cp"] = cp_cat.get("perfumaria_part")
+            summary["receita_total_categorias_cp"] = cp_cat.get("total_receita")
+            summary["categorias_cp"] = cp_cat
+
     return summary
 
 
@@ -644,6 +684,30 @@ def get_consultant_data_for_tab(data: Dict[str, Any], tab_type: str) -> pd.DataF
 
                 return df_res
 
+    elif tab_type in ["perfumaria", "categorias"]:
+        if config.FILE_TYPE_CATEGORIAS in data and data[config.FILE_TYPE_CATEGORIAS] is not None:
+            cat_data = data[config.FILE_TYPE_CATEGORIAS]
+            df_c = cat_data.get("CONSULTOR") if isinstance(cat_data, dict) else None
+            if df_c is not None and not df_c.empty:
+                df_res = df_c.copy()
+                # Enriquecer com Loja e PDV a partir de outros arquivos (ex: resumo)
+                mapping_loja = {}
+                mapping_pdv = {}
+                for ref_tab in ["resumo", "cuidados_faciais", "id_cliente", "loja_digital"]:
+                    ref_df = get_consultant_data_for_tab(data, ref_tab)
+                    if not ref_df.empty:
+                        c_col = next((c for c in ["Consultor", "CONSULTOR", "CONSULTOR(A)"] if c in ref_df.columns), None)
+                        if c_col and "Loja" in ref_df.columns:
+                            for _, r in ref_df.iterrows():
+                                c_name = str(r[c_col]).strip()
+                                if c_name not in mapping_loja:
+                                    mapping_loja[c_name] = r["Loja"]
+                                    mapping_pdv[c_name] = r.get("PDV", "")
+
+                df_res["Loja"] = df_res["Consultor"].apply(lambda x: mapping_loja.get(str(x).strip(), "Rede CP"))
+                df_res["PDV"] = df_res["Consultor"].apply(lambda x: mapping_pdv.get(str(x).strip(), ""))
+                return df_res
+
     return pd.DataFrame()
 
 
@@ -713,7 +777,8 @@ _INVERTED_METRICS = {"tme_medio", "id_cliente_2min"}
 _CP_DELTA_KEYS = [
     "nps_geral", "tme_medio", "conversao_digital",
     "id_cliente_cpf", "id_cliente_2min", "desafio_fidelidade",
-    "skin_share", "receita_total_gmv", "meta_pef_atingimento",
+    "skin_share", "receita_perfumaria_cp", "participacao_perfumaria_cp",
+    "receita_total_gmv", "meta_pef_atingimento",
     "ticket_medio", "itens_boleto", "boleto_turbinado",
     "boleto_promocional", "resgate_fidelidade", "conversao_fluxo",
 ]
@@ -723,6 +788,7 @@ _PDV_DELTA_COLS = [
     "nps", "receita", "meta_pef_realizado", "tme_ajustado_segundos",
     "conversao_digital", "id_cliente_cpf", "id_cliente_2min",
     "penetracao_desafio_fidelidade", "cuidados_faciais",
+    "receita_perfumaria", "participacao_perfumaria",
     "itens_boleto", "boletos_turbinados", "boletos_promocionais",
     "resgate_fidelidade", "conversao_acao_fluxo", "score_global",
 ]

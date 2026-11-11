@@ -117,6 +117,17 @@ def identify_file_type(uploaded_file) -> str:
         if "cuidados_faciais" in filename or "cuidados faciais" in filename:
             return config.FILE_TYPE_CUIDADOS_FACIAIS
 
+        # 5.1 Distribuição da Receita por Categoria (Perfumaria, Cabelos, etc.)
+        if "categoria" in filename or "distribuicao_da_receita_por_categoria" in filename:
+            return config.FILE_TYPE_CATEGORIAS
+        if all(s in [str(x).upper() for x in sheets] for s in ["PDV", "CP"]):
+            df_test = _read_excel_safe(uploaded_file, sheet_name="PDV", nrows=4)
+            if df_test is not None:
+                all_text = " ".join(str(c).upper() for c in df_test.columns)
+                all_text += " " + " ".join(str(v).upper() for v in df_test.values.flatten() if pd.notna(v))
+                if "PERFUMARIA" in all_text and ("CABELOS" in all_text or "MAQUIAGEM" in all_text):
+                    return config.FILE_TYPE_CATEGORIAS
+
         # 6-8. NPS files (Sheet0)
         if "Sheet0" in sheets or "nps" in filename or "melhores" in filename or "piores" in filename:
             df_test = _read_excel_safe(uploaded_file, sheet_name="Sheet0", header=None, nrows=15)
@@ -392,6 +403,117 @@ def parse_nps_geral(source) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _parse_pct(val) -> Optional[float]:
+    """Converte valor para percentual (0.0 a 1.0) tratando strings como '51,16%'."""
+    if val is None or pd.isna(val):
+        return None
+    num = _safe_numeric(val)
+    if num is None:
+        return None
+    return num / 100.0 if num > 1.0 else num
+
+
+def parse_receita_categorias(source) -> Optional[Dict[str, Any]]:
+    """
+    Parse do arquivo Loja_Distribuicao_da_receita_por_categoria.
+    Abas: FILTROS, CP, PDV, CONSULTOR (A).
+    Categorias: CABELOS, CUIDADOS DA PELE, GIFTS, MAQUIAGEM, PERFUMARIA, OUTROS.
+    """
+    try:
+        if hasattr(source, "seek"):
+            source.seek(0)
+        xls = pd.ExcelFile(source, engine="openpyxl")
+        
+        # 1. CP
+        cp_dict = {}
+        if "CP" in xls.sheet_names:
+            df_cp = pd.read_excel(xls, sheet_name="CP", header=None)
+            if df_cp is not None and len(df_cp) > 2:
+                r = df_cp.iloc[2]
+                cp_dict = {
+                    "total_receita": _safe_numeric(r[1]),
+                    "cabelos_receita": _safe_numeric(r[2]),
+                    "cabelos_part": _parse_pct(r[3]),
+                    "cuidados_pele_receita": _safe_numeric(r[4]),
+                    "cuidados_pele_part": _parse_pct(r[5]),
+                    "gifts_receita": _safe_numeric(r[6]),
+                    "gifts_part": _parse_pct(r[7]),
+                    "maquiagem_receita": _safe_numeric(r[8]),
+                    "maquiagem_part": _parse_pct(r[9]),
+                    "perfumaria_receita": _safe_numeric(r[10]),
+                    "perfumaria_part": _parse_pct(r[11]),
+                    "outros_receita": _safe_numeric(r[12]),
+                    "outros_part": _parse_pct(r[13]),
+                }
+
+        # 2. PDV
+        pdv_rows = []
+        if "PDV" in xls.sheet_names:
+            df_pdv = pd.read_excel(xls, sheet_name="PDV", header=None)
+            if df_pdv is not None and len(df_pdv) > 2:
+                for idx in range(2, len(df_pdv)):
+                    r = df_pdv.iloc[idx]
+                    pdv_raw = str(r[0]).strip()
+                    if not pdv_raw or pdv_raw.upper() in ["PDV", "TOTAL", "NAN", "", "NONE"]:
+                        continue
+                    pdv_rows.append({
+                        "pdv": config.normalize_pdv(pdv_raw),
+                        "total_receita": _safe_numeric(r[1]),
+                        "cabelos_receita": _safe_numeric(r[2]),
+                        "cabelos_part": _parse_pct(r[3]),
+                        "cuidados_pele_receita": _safe_numeric(r[4]),
+                        "cuidados_pele_part": _parse_pct(r[5]),
+                        "gifts_receita": _safe_numeric(r[6]),
+                        "gifts_part": _parse_pct(r[7]),
+                        "maquiagem_receita": _safe_numeric(r[8]),
+                        "maquiagem_part": _parse_pct(r[9]),
+                        "perfumaria_receita": _safe_numeric(r[10]),
+                        "perfumaria_part": _parse_pct(r[11]),
+                        "outros_receita": _safe_numeric(r[12]),
+                        "outros_part": _parse_pct(r[13]),
+                    })
+
+        # 3. CONSULTOR (A)
+        consult_rows = []
+        c_sheets = [s for s in xls.sheet_names if "CONSULTOR" in s.upper()]
+        if c_sheets:
+            df_c = pd.read_excel(xls, sheet_name=c_sheets[0], header=None)
+            if df_c is not None and len(df_c) > 2:
+                for idx in range(2, len(df_c)):
+                    r = df_c.iloc[idx]
+                    c_name = str(r[0]).strip()
+                    if not c_name or c_name.upper() in ["CONSULTOR (A)", "CONSULTOR", "TOTAL", "NAN", "", "NONE"]:
+                        continue
+                    consult_rows.append({
+                        "Consultor": c_name,
+                        "total_receita": _safe_numeric(r[1]),
+                        "cabelos_receita": _safe_numeric(r[2]),
+                        "cabelos_part": _parse_pct(r[3]),
+                        "cuidados_pele_receita": _safe_numeric(r[4]),
+                        "cuidados_pele_part": _parse_pct(r[5]),
+                        "gifts_receita": _safe_numeric(r[6]),
+                        "gifts_part": _parse_pct(r[7]),
+                        "maquiagem_receita": _safe_numeric(r[8]),
+                        "maquiagem_part": _parse_pct(r[9]),
+                        "perfumaria_receita": _safe_numeric(r[10]),
+                        "perfumaria_part": _parse_pct(r[11]),
+                        "outros_receita": _safe_numeric(r[12]),
+                        "outros_part": _parse_pct(r[13]),
+                    })
+
+        periodo = parse_filtros_periodo(xls)
+
+        return {
+            "CP": cp_dict,
+            "PDV": pd.DataFrame(pdv_rows),
+            "CONSULTOR": pd.DataFrame(consult_rows),
+            "_periodo": periodo,
+        }
+    except Exception as e:
+        logger.error(f"Erro ao parsear Loja_Distribuicao_da_receita_por_categoria: {e}")
+        return None
+
+
 # ═══════════════════════════════════════════════════════════════════
 # AUTO-DISCOVERY DE ARQUIVOS LOCAIS E MULTI-MESES
 # ═══════════════════════════════════════════════════════════════════
@@ -596,6 +718,8 @@ def _parse_by_type(source, ftype: str):
         return parse_loja_digital(source)
     elif ftype == config.FILE_TYPE_CUIDADOS_FACIAIS:
         return parse_cuidados_faciais(source)
+    elif ftype == config.FILE_TYPE_CATEGORIAS:
+        return parse_receita_categorias(source)
     elif ftype == config.FILE_TYPE_NPS_MELHORES:
         return parse_nps_ranking(source)
     elif ftype == config.FILE_TYPE_NPS_PIORES:
@@ -666,6 +790,7 @@ def load_all_files(uploaded_files: list, base_files: Optional[list] = None) -> D
     priority_order = [
         config.FILE_TYPE_RESUMO,
         config.FILE_TYPE_RECEITA,
+        config.FILE_TYPE_CATEGORIAS,
         config.FILE_TYPE_ID_CLIENTE,
         config.FILE_TYPE_LOJA_DIGITAL,
         config.FILE_TYPE_CUIDADOS_FACIAIS,

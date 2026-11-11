@@ -217,49 +217,25 @@ with st.sidebar:
     """)
     )
 
-    # ─── SELETOR INTELIGENTE DE COMPETÊNCIAS / MULTI-MESES ───
-    st.html("#### 📅 Competência / Período")
+    # ─── SELETOR INTELIGENTE DE COMPETÊNCIAS ───
+    st.html("#### 📅 Competência / Mês")
     available_months = discover_available_months()
     
     if available_months:
-        modo_visao = st.radio(
-            "Modo de Visualização:",
-            options=["Mês Individual", "Acumulado (Vários Meses)"],
-            index=0,
-            horizontal=True,
-            help="Escolha se deseja analisar um único mês fechado com comparativo MoM ou consolidar múltiplos meses."
-        )
-        
         month_labels = [m["label"] for m in available_months]
-        
-        if modo_visao == "Mês Individual":
-            selected_label = st.selectbox(
-                "Mês de Referência:",
-                options=month_labels,
-                index=len(month_labels) - 1,
-                help="Selecione o mês desejado. O sistema identificará automaticamente o mês anterior para exibição das variações (deltas)."
-            )
-            curr_idx = month_labels.index(selected_label)
-            m_curr = available_months[curr_idx]
-            m_ant = available_months[curr_idx - 1] if curr_idx > 0 else None
-            selected_labels = [selected_label]
-        else:
-            default_selection = month_labels[-2:] if len(month_labels) >= 2 else month_labels
-            selected_labels = st.multiselect(
-                "Meses para Consolidar:",
-                options=month_labels,
-                default=default_selection,
-                help="Selecione 2 ou mais competências para calcular o resultado acumulado dos 9 PDVs e das consultoras."
-            )
-            m_curr = None
-            m_ant = None
-            selected_label = "Acumulado"
+        selected_label = st.selectbox(
+            "Mês de Referência:",
+            options=month_labels,
+            index=len(month_labels) - 1,
+            help="Selecione o mês desejado. O sistema identifica automaticamente o mês anterior para exibição das variações (deltas)."
+        )
+        curr_idx = month_labels.index(selected_label)
+        m_curr = available_months[curr_idx]
+        m_ant = available_months[curr_idx - 1] if curr_idx > 0 else None
     else:
-        modo_visao = "Mês Individual"
         selected_label = None
         m_curr = None
         m_ant = None
-        selected_labels = []
 
     with st.expander("📤 Upload Manual de Planilhas", expanded=False):
         uploaded_files = st.file_uploader(
@@ -299,25 +275,7 @@ if uploaded_files:
     badge_sub = "Arquivos Importados Manualmente"
     modo_ativo = "Upload Manual"
 
-elif modo_visao == "Acumulado (Vários Meses)":
-    if not selected_labels:
-        st.warning("⚠️ Selecione pelo menos uma competência no seletor da barra lateral para visualizar o acumulado.")
-        st.stop()
-        
-    selected_month_objs = [m for m in available_months if m["label"] in selected_labels]
-    selected_month_objs.sort(key=lambda x: x["sort_key"])
-    ordered_labels = [m["label"] for m in selected_month_objs]
-    
-    with st.spinner("Consolidando competências selecionadas..."):
-        months_data_list = [get_cached_month_data(m["path"]) for m in selected_month_objs]
-        df, cp_summary, data = aggregate_months_data(months_data_list, ordered_labels)
-        
-    data_ant = {}
-    periodo_exibicao = f"Acumulado • {len(ordered_labels)} Meses"
-    badge_sub = f"{ordered_labels[0]} a {ordered_labels[-1]}" if len(ordered_labels) > 1 else ordered_labels[0]
-    modo_ativo = "Acumulado"
-
-else:  # Mês Individual
+else:
     if m_curr:
         data = get_cached_month_data(m_curr["path"])
         data_ant = get_cached_month_data(m_ant["path"]) if m_ant else {}
@@ -357,30 +315,24 @@ if df is not None and not df.empty:
     # Log de arquivos na sidebar
     with info_placeholder.container():
         with st.expander("📋 Planilhas Processadas", expanded=False):
-            if modo_ativo == "Acumulado":
-                st.markdown(f"**Competências Consolidadas ({len(selected_labels)}):**")
-                for lbl in selected_labels:
-                    render_html(f'<div style="font-size: 12px; color: #004225; font-weight: 700; margin-bottom: 2px;">• {lbl}</div>')
-                st.markdown(f"**Total de arquivos lidos:** {len(data.get('_log', []))}")
-            else:
-                st.markdown(f"**{periodo_exibicao} ({len(data.get('_log', []))} arquivos):**")
-                for log_line in data.get("_log", []):
+            st.markdown(f"**{periodo_exibicao} ({len(data.get('_log', []))} arquivos):**")
+            for log_line in data.get("_log", []):
+                render_html(
+                    f'<div style="font-size: 12px; color: #334155; margin-bottom: 3px;">{log_line}</div>'
+                )
+            if data_ant and data_ant.get("_log"):
+                st.markdown(f"**Referência Anterior ({len(data_ant.get('_log', []))} arquivos):**")
+                for log_line in data_ant.get("_log", []):
                     render_html(
-                        f'<div style="font-size: 12px; color: #334155; margin-bottom: 3px;">{log_line}</div>'
+                        f'<div style="font-size: 12px; color: #64748B; margin-bottom: 3px;">{log_line}</div>'
                     )
-                if data_ant and data_ant.get("_log"):
-                    st.markdown(f"**Referência Anterior ({len(data_ant.get('_log', []))} arquivos):**")
-                    for log_line in data_ant.get("_log", []):
-                        render_html(
-                            f'<div style="font-size: 12px; color: #64748B; margin-bottom: 3px;">{log_line}</div>'
-                        )
 
     # Botão de exportação PDF na sidebar
     with pdf_placeholder.container():
         st.html("#### 📄 Relatório Executivo")
         try:
             pdf_bytes = generate_pdf_report(df, cp_summary, data_raw=data)
-            pdf_slug = "acumulado" if modo_ativo == "Acumulado" else (selected_label.replace(" / ", "_").replace(" ", "_").lower() if 'selected_label' in locals() and selected_label else "fechamento")
+            pdf_slug = selected_label.replace(" / ", "_").replace(" ", "_").lower() if 'selected_label' in locals() and selected_label else "fechamento"
             st.download_button(
                 label="⬇️ Baixar Relatório PDF",
                 data=pdf_bytes,
@@ -435,7 +387,7 @@ if df is not None and not df.empty:
             "2 | TME e Conversão",
             "3 | ID Cliente",
             "4 | Fidelidade",
-            "5 | Skin Lojas",
+            "5 | Skin + Categorias",
             "6 | Indicadores Gerais",
             "7 | Receita Lojas",
             "8 | Resumo Geral",

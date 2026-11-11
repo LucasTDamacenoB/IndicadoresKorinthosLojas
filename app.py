@@ -224,38 +224,37 @@ with st.sidebar:
     
     if available_months:
         month_labels = [m["label"] for m in available_months]
-        default_idx = len(month_labels) - 1
+        
+        # Por padrão, abre no último mês individual fechado (ex: Outubro / 2026)
         regular_indices = [i for i, m in enumerate(available_months) if m.get("month_num", 99) <= 12]
-        if regular_indices:
-            default_idx = regular_indices[-1]
-            
+        default_idx = regular_indices[-1] if regular_indices else len(month_labels) - 1
+        
         selected_label = st.selectbox(
-            "Visualizar Fechamento:",
+            "Mês de Referência:",
             options=month_labels,
             index=default_idx,
-            help="Selecione o mês desejado ou a pasta de período acumulado."
+            help="Selecione o mês desejado. O sistema identifica automaticamente o mês anterior para exibição das variações (deltas)."
         )
         curr_idx = month_labels.index(selected_label)
         m_curr = available_months[curr_idx]
         
-        # Identificar automaticamente a melhor competência base para comparativo (deltas)
-        default_ant = find_default_baseline_month(m_curr, available_months)
-        default_ant_label = default_ant["label"] if default_ant else "Nenhum (Sem comparativo)"
-        
-        comp_options = ["Nenhum (Sem comparativo)"] + [m["label"] for m in available_months if m["label"] != selected_label]
-        comp_default_idx = comp_options.index(default_ant_label) if default_ant_label in comp_options else 0
-        
-        selected_ant_label = st.selectbox(
-            "Comparar com (Mês Base):",
-            options=comp_options,
-            index=comp_default_idx,
-            help="Competência de referência para cálculo das variações (Δ) e evolução dos indicadores."
-        )
-        
-        if selected_ant_label != "Nenhum (Sem comparativo)":
-            m_ant = next((m for m in available_months if m["label"] == selected_ant_label), None)
+        # Mês anterior para comparativo (deltas):
+        # 1. Se for a pasta acumulada (Setembro + Outubro), compara automaticamente com Agosto / 2026.
+        # 2. Se for mês individual normal, segue rigorosamente a ordem cronológica do mês anterior.
+        if "acumulado" in m_curr.get("id", "").lower() or "acumulado" in selected_label.lower():
+            m_ant = next((m for m in available_months if m.get("month_num") == 8), None)
+            if not m_ant and len(regular_indices) >= 2:
+                m_ant = available_months[regular_indices[-2]]
         else:
-            m_ant = None
+            reg_curr_idx = -1
+            for i, idx in enumerate(regular_indices):
+                if available_months[idx]["label"] == selected_label:
+                    reg_curr_idx = i
+                    break
+            if reg_curr_idx > 0:
+                m_ant = available_months[regular_indices[reg_curr_idx - 1]]
+            else:
+                m_ant = None
     else:
         selected_label = None
         m_curr = None
@@ -321,12 +320,11 @@ else:
     
     periodo_exibicao = m_curr["label"] if m_curr else data.get("_periodo", "Período Atual")
     if m_ant:
-        ant_period_str = f" ({data_ant.get('_periodo')})" if data_ant.get('_periodo') else ""
-        badge_sub = f"Comparativo vs {m_ant['label']}{ant_period_str}"
+        badge_sub = f"Ref. Anterior: {m_ant['label']} ({data_ant.get('_periodo', '')})"
     elif data.get("_periodo_anterior"):
-        badge_sub = f"Comparativo vs {data.get('_periodo_anterior')}"
+        badge_sub = f"Ref. Anterior: {data.get('_periodo_anterior')}"
     else:
-        badge_sub = "Sem base comparativa selecionada"
+        badge_sub = "Primeiro Mês da Série (Sem mês anterior)"
     modo_ativo = "Mês Individual"
 
 consultant_df = get_consultant_data(data)

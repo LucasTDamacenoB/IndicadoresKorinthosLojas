@@ -393,8 +393,141 @@ def parse_nps_geral(source) -> Optional[Dict[str, Any]]:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# AUTO-DISCOVERY DE ARQUIVOS LOCAIS
+# AUTO-DISCOVERY DE ARQUIVOS LOCAIS E MULTI-MESES
 # ═══════════════════════════════════════════════════════════════════
+
+MONTH_NAMES = {
+    "janeiro": 1, "jan": 1,
+    "fevereiro": 2, "fev": 2,
+    "marco": 3, "março": 3, "mar": 3,
+    "abril": 4, "abr": 4,
+    "maio": 5, "mai": 5,
+    "junho": 6, "jun": 6,
+    "julho": 7, "jul": 7,
+    "agosto": 8, "ago": 8,
+    "setembro": 9, "set": 9,
+    "outubro": 10, "out": 10,
+    "novembro": 11, "nov": 11,
+    "dezembro": 12, "dez": 12,
+}
+
+MONTH_DISPLAY = {
+    1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril",
+    5: "Maio", 6: "Junho", 7: "Julho", 8: "Agosto",
+    9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro"
+}
+
+
+def discover_available_months(dados_dir: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Varre o diretório Dados/ em busca de subpastas com planilhas Excel (.xlsx).
+    Identifica o mês e ano de cada pasta e as ordena cronologicamente.
+    
+    Retorna lista de dicionários ordenados cronologicamente:
+    [
+        {
+            "id": "7. julho",
+            "path": "c:/.../Dados/7. julho",
+            "label": "Julho / 2026",
+            "month_num": 7,
+            "year": 2026,
+            "sort_key": (2026, 7),
+            "file_count": 9,
+        },
+        ...
+    ]
+    """
+    if dados_dir is None:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        dados_dir = os.path.join(base_dir, "Dados")
+        
+    months = []
+    if not os.path.isdir(dados_dir):
+        return months
+        
+    for entry in os.listdir(dados_dir):
+        full_path = os.path.join(dados_dir, entry)
+        if not os.path.isdir(full_path):
+            continue
+            
+        xlsx_files = [
+            f for f in glob.glob(os.path.join(full_path, "*.xlsx"))
+            if not os.path.basename(f).startswith("~$")
+        ]
+        if not xlsx_files:
+            continue
+            
+        entry_lower = entry.lower()
+        month_num = None
+        year = 2026
+        
+        # 1. Ano no nome da pasta
+        y_match = re.search(r"20\d\d", entry)
+        if y_match:
+            year = int(y_match.group(0))
+            
+        # 2. Número inicial da pasta (ex: '7. julho', '10. outubro', '08 - agosto')
+        num_match = re.match(r"^\s*(\d+)", entry)
+        if num_match:
+            n = int(num_match.group(1))
+            if 1 <= n <= 12:
+                month_num = n
+                
+        # 3. Nome do mês em português
+        for m_name, m_val in MONTH_NAMES.items():
+            if m_name in entry_lower:
+                month_num = m_val
+                break
+                
+        if month_num is None:
+            month_num = 99
+            label = entry
+        else:
+            label = f"{MONTH_DISPLAY[month_num]} / {year}"
+            
+        months.append({
+            "id": entry,
+            "path": full_path,
+            "label": label,
+            "month_num": month_num,
+            "year": year,
+            "sort_key": (year, month_num),
+            "file_count": len(xlsx_files),
+        })
+        
+    # Ordenar cronologicamente
+    months.sort(key=lambda x: x["sort_key"])
+    
+    # Se nenhuma subpasta com arquivos foi encontrada, verificar se existem arquivos diretamente em Dados/
+    if not months:
+        root_files = [
+            f for f in glob.glob(os.path.join(dados_dir, "*.xlsx"))
+            if not os.path.basename(f).startswith("~$")
+        ]
+        if root_files:
+            months.append({
+                "id": "_root",
+                "path": dados_dir,
+                "label": "Dados Gerais",
+                "month_num": 1,
+                "year": 2026,
+                "sort_key": (2026, 1),
+                "file_count": len(root_files),
+            })
+            
+    return months
+
+
+def load_files_for_folder(folder_path: str) -> Dict[str, Any]:
+    """Carrega todos os arquivos .xlsx válidos de uma subpasta."""
+    if not os.path.isdir(folder_path):
+        return {}
+    xlsx_files = [
+        f for f in sorted(glob.glob(os.path.join(folder_path, "*.xlsx")))
+        if not os.path.basename(f).startswith("~$")
+    ]
+    return load_all_files(xlsx_files)
+
 
 def auto_discover_local_files(subdir: str = "mes_atual") -> list:
     """
@@ -402,8 +535,9 @@ def auto_discover_local_files(subdir: str = "mes_atual") -> list:
     
     Prioridade:
       1. Dados/<subdir>/*.xlsx  (ex: Dados/mes_atual/, Dados/mes_anterior/)
-      2. Dados/*.xlsx           (fallback: compatibilidade retroativa)
-      3. Raiz do projeto *.xlsx (último recurso)
+      2. Se subdir == 'mes_atual' ou 'mes_anterior', descobre cronologicamente as pastas de Dados/
+      3. Dados/*.xlsx           (fallback: compatibilidade retroativa)
+      4. Raiz do projeto *.xlsx (último recurso)
     """
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     dados_base = os.path.join(base_dir, "Dados")
@@ -416,15 +550,30 @@ def auto_discover_local_files(subdir: str = "mes_atual") -> list:
         for f in sorted(glob.glob(os.path.join(subdir_path, "*.xlsx"))):
             if not os.path.basename(f).startswith("~$"):
                 found_files.append(f)
-    
-    # 2. Fallback apenas para mes_atual se a subpasta não existir ou estiver vazia
+                
+    # 2. Se não encontrou, tenta descobrir dinamicamente pelas pastas de meses
+    if not found_files and os.path.isdir(dados_base):
+        discovered = discover_available_months(dados_base)
+        if discovered:
+            if subdir == "mes_atual":
+                latest_folder = discovered[-1]["path"]
+                for f in sorted(glob.glob(os.path.join(latest_folder, "*.xlsx"))):
+                    if not os.path.basename(f).startswith("~$"):
+                        found_files.append(f)
+            elif subdir == "mes_anterior" and len(discovered) >= 2:
+                prev_folder = discovered[-2]["path"]
+                for f in sorted(glob.glob(os.path.join(prev_folder, "*.xlsx"))):
+                    if not os.path.basename(f).startswith("~$"):
+                        found_files.append(f)
+
+    # 3. Fallback apenas para mes_atual se a subpasta não existir ou estiver vazia
     if not found_files and subdir == "mes_atual":
         if os.path.isdir(dados_base):
             for f in sorted(glob.glob(os.path.join(dados_base, "*.xlsx"))):
                 if not os.path.basename(f).startswith("~$"):
                     found_files.append(f)
         
-        # 3. Último recurso: raiz do projeto
+        # 4. Último recurso: raiz do projeto
         if not found_files:
             for f in sorted(glob.glob(os.path.join(base_dir, "*.xlsx"))):
                 if not os.path.basename(f).startswith("~$") and f not in found_files:

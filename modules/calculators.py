@@ -550,7 +550,11 @@ def get_cp_summary(data: Dict[str, Any]) -> dict:
 def get_consultant_data_for_tab(data: Dict[str, Any], tab_type: str) -> pd.DataFrame:
     """
     Retorna o DataFrame de consultoras limpo, enriquecido e padronizado para o módulo específico.
+    Se houver dados consolidados pré-calculados em _consultant_data_override, utiliza-os diretamente.
     """
+    if data and "_consultant_data_override" in data and tab_type in data["_consultant_data_override"]:
+        return data["_consultant_data_override"][tab_type].copy()
+
     if tab_type == "id_cliente":
         if config.FILE_TYPE_ID_CLIENTE in data and data[config.FILE_TYPE_ID_CLIENTE] is not None:
             id_data = data[config.FILE_TYPE_ID_CLIENTE]
@@ -853,3 +857,387 @@ def format_delta(delta_val, fmt_type="pct", inverted=False, as_html=True):
     if as_html:
         return f'<span style="color: {color}; font-size: 12px; font-weight: 700;">{arrow} {txt}</span>'
     return f"{arrow} {txt}"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CONSOLIDAÇÃO MULTI-MESES (VISÃO ACUMULADA)
+# ═══════════════════════════════════════════════════════════════════
+
+def aggregate_consultants(months_data_list: List[Dict[str, Any]]) -> Dict[str, pd.DataFrame]:
+    """Consolida os dados de consultoras de todos os módulos para múltiplos meses."""
+    overrides = {}
+
+    def _w_avg(s: pd.Series, w: pd.Series) -> float:
+        valid = s.notna() & (w > 0)
+        if valid.any():
+            return float((s[valid] * w[valid]).sum() / w[valid].sum())
+        return np.nan
+
+    # 1. Resumo e Receita
+    cdfs_res = [get_consultant_data_for_tab(d, "resumo") for d in months_data_list]
+    cdfs_res = [c for c in cdfs_res if not c.empty]
+    if cdfs_res:
+        comb = pd.concat(cdfs_res, ignore_index=True)
+        comb["Consultor"] = comb["Consultor"].astype(str).str.strip()
+        rows = []
+        for (c, pdv, loja), g in comb.groupby(["Consultor", "PDV", "Loja"]):
+            tot_rec = g["Receita"].sum()
+            tot_bol = g["Quantidade de Boletos"].sum()
+            w = g["Quantidade de Boletos"].fillna(0)
+            rows.append({
+                "Consultor": c,
+                "PDV": pdv,
+                "Loja": loja,
+                "Receita": tot_rec,
+                "Vs. Período Anterior": np.nan,
+                "Quantidade de Boletos": tot_bol,
+                "Boleto Médio": tot_rec / tot_bol if tot_bol > 0 else np.nan,
+                "Itens por Boleto": _w_avg(g["Itens por Boleto"], w),
+                "Penetração Boleto Turbinado": _w_avg(g["Penetração Boleto Turbinado"], w),
+                "Penetração Boleto Promocional": _w_avg(g["Penetração Boleto Promocional"], w),
+                "Resgate Fidelidade": _w_avg(g["Resgate Fidelidade"], w),
+            })
+        df_res = pd.DataFrame(rows).sort_values("Receita", ascending=False)
+        overrides["resumo"] = df_res
+        overrides["receita"] = df_res.copy()
+
+    # 2. Loja Digital
+    cdfs_ld = [get_consultant_data_for_tab(d, "loja_digital") for d in months_data_list]
+    cdfs_ld = [c for c in cdfs_ld if not c.empty]
+    if cdfs_ld:
+        comb_ld = pd.concat(cdfs_ld, ignore_index=True)
+        comb_ld["CONSULTOR(A)"] = comb_ld["CONSULTOR(A)"].astype(str).str.strip()
+        rows = []
+        for (c, pdv, loja), g in comb_ld.groupby(["CONSULTOR(A)", "PDV", "Loja"]):
+            atend = g["CLIENTES ATENDIDOS"].sum()
+            conv = g["CLIENTES CONVERTIDOS"].sum()
+            rec = g["RECEITA (R$)"].sum() if "RECEITA (R$)" in g.columns else np.nan
+            bm = rec / conv if (pd.notna(rec) and conv > 0) else np.nan
+            tme_secs = [_time_str_to_seconds(t) for t in g["TME AJUSTADO"]]
+            w_tme = g["CLIENTES ATENDIDOS"].fillna(0)
+            avg_tme_sec = _w_avg(pd.Series(tme_secs), w_tme)
+            tme_str = _seconds_to_time_str(int(round(avg_tme_sec))) if pd.notna(avg_tme_sec) else "00:00"
+            rows.append({
+                "CONSULTOR(A)": c,
+                "PDV": pdv,
+                "Loja": loja,
+                "CLIENTES ATENDIDOS": atend,
+                "TME AJUSTADO": tme_str,
+                "CLIENTES CONVERTIDOS": conv,
+                "% CONVERSÃO": conv / atend if atend > 0 else np.nan,
+                "RECEITA (R$)": rec,
+                "BOLETO MEDIO (R$)": bm,
+            })
+        overrides["loja_digital"] = pd.DataFrame(rows).sort_values("CLIENTES ATENDIDOS", ascending=False)
+
+    # 3. ID Cliente
+    cdfs_id = [get_consultant_data_for_tab(d, "id_cliente") for d in months_data_list]
+    cdfs_id = [c for c in cdfs_id if not c.empty]
+    if cdfs_id:
+        comb_id = pd.concat(cdfs_id, ignore_index=True)
+        comb_id["CONSULTOR"] = comb_id["CONSULTOR"].astype(str).str.strip()
+        rows = []
+        for (pdv, c, loja), g in comb_id.groupby(["PDV", "CONSULTOR", "Loja"]):
+            atend_id = g["ATENDIMENTOS NO ID CLIENTE"].sum()
+            atend_cpf = g["ATENDIMENTOS COM CPF (COM E SEM COMPRA)"].sum()
+            atend_ind = g["ATENDIMENTOS USO INDEVIDO"].sum()
+            tot_bol = g["TOTAL BOLETOS"].sum()
+            bol_id = g["BOLETOS ID"].sum()
+            bol_ind = g["BOLETOS ID CLIENTE USO INDEVIDO"].sum()
+            bol_2m = g["BOLETOS ID CLIENTE TMA CPF ABAIXO DE 2MIN"].sum()
+            w_bol = g["TOTAL BOLETOS"].fillna(0)
+            tma_secs = [_time_str_to_seconds(t) for t in g["TEMPO MÉDIO DE ATENDIMENTO (TMA CPF)"]]
+            w_atend = g["ATENDIMENTOS NO ID CLIENTE"].fillna(0)
+            avg_tma_sec = _w_avg(pd.Series(tma_secs), w_atend)
+            tma_str = _seconds_to_time_str(int(round(avg_tma_sec))) if pd.notna(avg_tma_sec) else "00:00"
+            rows.append({
+                "PDV": pdv,
+                "CONSULTOR": c,
+                "Loja": loja,
+                "ATENDIMENTOS NO ID CLIENTE": atend_id,
+                "ATENDIMENTOS COM CPF (COM E SEM COMPRA)": atend_cpf,
+                "ATENDIMENTOS USO INDEVIDO": atend_ind,
+                "% Atendimentos com CPF (IAF 2026)": atend_cpf / atend_id if atend_id > 0 else np.nan,
+                "% ATENDIMENTOS USO INDEVIDO": atend_ind / atend_id if atend_id > 0 else np.nan,
+                "TEMPO MÉDIO DE ATENDIMENTO (TMA CPF)": tma_str,
+                "TOTAL BOLETOS": tot_bol,
+                "BOLETOS ID": bol_id,
+                "BOLETOS ID CLIENTE USO INDEVIDO": bol_ind,
+                "BOLETOS ID CLIENTE TMA CPF ABAIXO DE 2MIN": bol_2m,
+                "% BOLETOS ID CLIENTE VÁLIDOS (IAF)": _w_avg(g["% BOLETOS ID CLIENTE VÁLIDOS (IAF)"], w_bol),
+                "% BOLETOS ID CLIENTE USO INDEVIDO": bol_ind / tot_bol if tot_bol > 0 else np.nan,
+                "% BOLETOS ID CLIENTE TMA CPF ABAIXO DE 2MIN": bol_2m / tot_bol if tot_bol > 0 else np.nan,
+            })
+        overrides["id_cliente"] = pd.DataFrame(rows).sort_values("TOTAL BOLETOS", ascending=False)
+
+    # 4. Fidelidade
+    cdfs_fid = [get_consultant_data_for_tab(d, "fidelidade") for d in months_data_list]
+    cdfs_fid = [c for c in cdfs_fid if not c.empty]
+    if cdfs_fid:
+        comb_fid = pd.concat(cdfs_fid, ignore_index=True)
+        comb_fid["Consultor"] = comb_fid["Consultor"].astype(str).str.strip()
+        rows = []
+        for c, g in comb_fid.groupby("Consultor"):
+            des = g["Qnt de boleto com desafios concluídos"].sum()
+            fid = g["Qnt de boletos Fidelidade"].sum()
+            rows.append({
+                "Consultor": c,
+                "Qnt de boleto com desafios concluídos": des,
+                "Qnt de boletos Fidelidade": fid,
+                "% Penetração Desafio Fidelidade": des / fid if fid > 0 else np.nan,
+            })
+        overrides["fidelidade"] = pd.DataFrame(rows).sort_values("Qnt de boletos Fidelidade", ascending=False)
+
+    # 5. Cuidados Faciais
+    cdfs_cf = [get_consultant_data_for_tab(d, "cuidados_faciais") for d in months_data_list]
+    cdfs_cf = [c for c in cdfs_cf if not c.empty]
+    if cdfs_cf:
+        comb_cf = pd.concat(cdfs_cf, ignore_index=True)
+        comb_cf["Consultor"] = comb_cf["Consultor"].astype(str).str.strip()
+        rows = []
+        for (c, pdv, loja), g in comb_cf.groupby(["Consultor", "PDV", "Loja"]):
+            rec_skin = g["RECEITA (R$)"].sum()
+            pct_rec = g["(%) RECEITA"].mean()
+            rows.append({
+                "Consultor": c,
+                "PDV": pdv,
+                "Loja": loja,
+                "RECEITA (R$)": rec_skin,
+                "(%) RECEITA": pct_rec,
+            })
+        overrides["cuidados_faciais"] = pd.DataFrame(rows).sort_values("RECEITA (R$)", ascending=False)
+
+    return overrides
+
+
+def aggregate_months_data(
+    months_data_list: List[Dict[str, Any]],
+    month_labels: Optional[List[str]] = None,
+) -> tuple:
+    """
+    Consolida múltiplos meses de dados em uma visão acumulada completa.
+    
+    Retorna:
+        df_acum: DataFrame consolidado dos 9 PDVs com taxas recalculadas e score_global reavaliado
+        cp_acum: dict de indicadores consolidados da franquia CP Korinthos
+        data_acum: dict com _consultant_data_override e metadados de acumulado
+    """
+    if not months_data_list:
+        return pd.DataFrame(), {}, {}
+
+    if len(months_data_list) == 1:
+        d = months_data_list[0]
+        return build_consolidated(d), get_cp_summary(d), d
+
+    # 1. Obter DataFrames consolidados de cada mês
+    dfs = [build_consolidated(d) for d in months_data_list]
+    cps = [get_cp_summary(d) for d in months_data_list]
+
+    # 2. Construir tabela mestre acumulada para os 9 PDVs
+    rows = []
+    for pdv_code in config.TARGET_PDVS:
+        info = config.PDV_MAP[pdv_code]
+        rows.append({
+            "pdv": pdv_code,
+            "sigla": info["sigla"],
+            "nome_loja": info.get("nome", info["sigla"]),
+            "label": config.get_pdv_label(pdv_code),
+            "cidade": info["cidade"],
+            "local": info["local"],
+        })
+    df_acum = pd.DataFrame(rows).set_index("pdv")
+
+    # Colunas de soma direta
+    sum_cols = [
+        "receita", "receita_loja", "receita_cr", "meta_pef_loja", "meta_pef_total",
+        "volume_boletos", "servicos_loja", "clique_retire", "receita_skin", "nps_registros",
+        "boletos_desafio_qtd", "boletos_fidelidade_qtd",
+        "clientes_encaminhados", "clientes_atendidos", "clientes_convertidos",
+    ]
+
+    for pdv in config.TARGET_PDVS:
+        pdv_rows = [df.set_index("pdv").loc[pdv] for df in dfs if pdv in df.set_index("pdv").index]
+        if not pdv_rows:
+            continue
+
+        for c in sum_cols:
+            vals = [r[c] for r in pdv_rows if c in r and pd.notna(r[c])]
+            df_acum.loc[pdv, c] = sum(vals) if vals else np.nan
+
+        rec = df_acum.loc[pdv, "receita"]
+        meta_tot = df_acum.loc[pdv, "meta_pef_total"]
+        vol_bol = df_acum.loc[pdv, "volume_boletos"]
+        cli_conv = df_acum.loc[pdv, "clientes_convertidos"]
+        cli_atend = df_acum.loc[pdv, "clientes_atendidos"]
+        bol_des = df_acum.loc[pdv, "boletos_desafio_qtd"]
+        bol_fid = df_acum.loc[pdv, "boletos_fidelidade_qtd"]
+        rec_skin = df_acum.loc[pdv, "receita_skin"]
+
+        df_acum.loc[pdv, "gap_pef"] = meta_tot - rec if (pd.notna(meta_tot) and pd.notna(rec)) else np.nan
+        df_acum.loc[pdv, "meta_pef_realizado"] = (rec / meta_tot) if (pd.notna(rec) and pd.notna(meta_tot) and meta_tot > 0) else np.nan
+        df_acum.loc[pdv, "ticket_medio"] = (rec / vol_bol) if (pd.notna(rec) and pd.notna(vol_bol) and vol_bol > 0) else np.nan
+        df_acum.loc[pdv, "conversao_digital"] = (cli_conv / cli_atend) if (pd.notna(cli_conv) and pd.notna(cli_atend) and cli_atend > 0) else np.nan
+        df_acum.loc[pdv, "penetracao_desafio_fidelidade"] = (bol_des / bol_fid) if (pd.notna(bol_des) and pd.notna(bol_fid) and bol_fid > 0) else np.nan
+        df_acum.loc[pdv, "cuidados_faciais"] = (rec_skin / rec) if (pd.notna(rec_skin) and pd.notna(rec) and rec > 0) else np.nan
+
+        # Médias ponderadas por volume de boletos
+        def _w_avg_pdv(col, w_col):
+            vals = []
+            weights = []
+            for r in pdv_rows:
+                if col in r and w_col in r and pd.notna(r[col]) and pd.notna(r[w_col]) and r[w_col] > 0:
+                    vals.append(float(r[col]))
+                    weights.append(float(r[w_col]))
+            if weights and sum(weights) > 0:
+                return sum(v * w for v, w in zip(vals, weights)) / sum(weights)
+            fallback = [float(r[col]) for r in pdv_rows if col in r and pd.notna(r[col])]
+            return np.mean(fallback) if fallback else np.nan
+
+        for c in [
+            "itens_boleto", "boletos_turbinados", "boletos_promocionais",
+            "share_alavancas", "penetracao_mobshop", "boletos_1",
+            "penetracao_fidelidade", "resgate_fidelidade", "conversao_acao_fluxo",
+            "id_cliente_cpf", "id_cliente_validos", "id_cliente_2min"
+        ]:
+            df_acum.loc[pdv, c] = _w_avg_pdv(c, "volume_boletos")
+
+        # Preço Médio
+        ib = df_acum.loc[pdv, "itens_boleto"]
+        if pd.notna(rec) and pd.notna(vol_bol) and pd.notna(ib) and (vol_bol * ib) > 0:
+            df_acum.loc[pdv, "preco_medio"] = rec / (vol_bol * ib)
+        else:
+            df_acum.loc[pdv, "preco_medio"] = _w_avg_pdv("preco_medio", "volume_boletos")
+
+        # NPS ponderado por registros
+        df_acum.loc[pdv, "nps"] = _w_avg_pdv("nps", "nps_registros")
+
+        # TME ponderado por atendimentos
+        tme_secs = _w_avg_pdv("tme_ajustado_segundos", "clientes_atendidos")
+        df_acum.loc[pdv, "tme_ajustado_segundos"] = tme_secs
+        df_acum.loc[pdv, "tme_ajustado"] = _seconds_to_time_str(int(round(tme_secs))) if pd.notna(tme_secs) else "00:00"
+
+        # Fallback cuidados faciais
+        if pd.isna(df_acum.loc[pdv, "cuidados_faciais"]):
+            df_acum.loc[pdv, "cuidados_faciais"] = _w_avg_pdv("cuidados_faciais", "receita")
+
+    # Representatividade
+    tot_rec = df_acum["receita"].sum()
+    if tot_rec > 0:
+        df_acum["representatividade"] = df_acum["receita"] / tot_rec
+
+    # Recalcular Score Global (0 a 12)
+    for idx, row in df_acum.iterrows():
+        score = 0
+        if pd.notna(row.get("meta_pef_realizado")) and row["meta_pef_realizado"] >= 1.00: score += 1
+        if pd.notna(row.get("nps")) and row["nps"] >= 90.9: score += 1
+        tme_s = row.get("tme_ajustado_segundos")
+        if pd.notna(tme_s) and tme_s > 0 and tme_s <= 420: score += 1
+        conv_v = row.get("conversao_digital", row.get("conversao_acao_fluxo"))
+        if pd.notna(conv_v) and conv_v >= 0.10: score += 1
+        cpf_v = row.get("id_cliente_cpf")
+        if pd.notna(cpf_v) and cpf_v >= 1.15: score += 1
+        b2m_v = row.get("id_cliente_2min")
+        if pd.notna(b2m_v) and b2m_v <= 0.30: score += 1
+        if pd.notna(row.get("penetracao_desafio_fidelidade")) and row["penetracao_desafio_fidelidade"] >= 0.20: score += 1
+        if pd.notna(row.get("cuidados_faciais")) and row["cuidados_faciais"] >= 0.021: score += 1
+        if pd.notna(row.get("itens_boleto")) and row["itens_boleto"] >= 2.50: score += 1
+        if pd.notna(row.get("boletos_turbinados")) and row["boletos_turbinados"] >= 0.31: score += 1
+        if pd.notna(row.get("boletos_promocionais")) and row["boletos_promocionais"] >= 0.33: score += 1
+        if pd.notna(row.get("resgate_fidelidade")) and row["resgate_fidelidade"] >= 0.52: score += 1
+        df_acum.loc[idx, "score_global"] = int(score)
+
+    df_acum.reset_index(inplace=True)
+
+    # 3. Consolidar CP Summary
+    periodo_label = " + ".join(month_labels) if month_labels else f"{len(months_data_list)} Meses"
+    cp_acum = {
+        "periodo": f"Acumulado ({periodo_label})",
+        "receita_total_gmv": df_acum["receita"].sum(),
+        "meta_pef_total": df_acum["meta_pef_total"].sum(),
+        "receita_loja_cp": df_acum["receita_loja"].sum(),
+        "meta_pef_loja_cp": df_acum["meta_pef_loja"].sum(),
+        "receita_cr_cp": df_acum["receita_cr"].sum(),
+        "volume_boletos": int(df_acum["volume_boletos"].sum()) if pd.notna(df_acum["volume_boletos"].sum()) else 0,
+        "receita_skin_cp": df_acum["receita_skin"].sum(),
+    }
+    cp_acum["meta_pef_atingimento"] = (cp_acum["receita_total_gmv"] / cp_acum["meta_pef_total"]) if (pd.notna(cp_acum["meta_pef_total"]) and cp_acum["meta_pef_total"] > 0) else np.nan
+    cp_acum["ticket_medio"] = (cp_acum["receita_total_gmv"] / cp_acum["volume_boletos"]) if (pd.notna(cp_acum["volume_boletos"]) and cp_acum["volume_boletos"] > 0) else np.nan
+    cp_acum["skin_share"] = (cp_acum["receita_skin_cp"] / cp_acum["receita_total_gmv"]) if (pd.notna(cp_acum["receita_total_gmv"]) and cp_acum["receita_total_gmv"] > 0) else np.nan
+
+    month_vols = [cp.get("volume_boletos", 0) or 0 for cp in cps]
+    tot_month_vols = sum(month_vols)
+
+    def _cp_w_avg(key):
+        if tot_month_vols > 0:
+            valid_pairs = [(cp[key], v) for cp, v in zip(cps, month_vols) if key in cp and pd.notna(cp[key]) and v > 0]
+            if valid_pairs:
+                return float(sum(val * w for val, w in valid_pairs) / sum(w for _, w in valid_pairs))
+        vals = [cp[key] for cp in cps if key in cp and pd.notna(cp[key])]
+        return float(np.mean(vals)) if vals else np.nan
+
+    for k in [
+        "itens_boleto", "share_alavancas", "boletos_1", "boleto_turbinado",
+        "boleto_promocional", "penetracao_mobshop", "penetracao_fidelidade",
+        "resgate_fidelidade", "conversao_fluxo", "id_cliente_cpf", "id_cliente_2min"
+    ]:
+        cp_acum[k] = _cp_w_avg(k)
+
+    if pd.notna(cp_acum["receita_total_gmv"]) and pd.notna(cp_acum["volume_boletos"]) and pd.notna(cp_acum["itens_boleto"]) and (cp_acum["volume_boletos"] * cp_acum["itens_boleto"]) > 0:
+        cp_acum["preco_medio"] = cp_acum["receita_total_gmv"] / (cp_acum["volume_boletos"] * cp_acum["itens_boleto"])
+    else:
+        cp_acum["preco_medio"] = _cp_w_avg("preco_medio")
+
+    tot_bol_des = df_acum["boletos_desafio_qtd"].sum()
+    tot_bol_fid = df_acum["boletos_fidelidade_qtd"].sum()
+    if pd.notna(tot_bol_fid) and tot_bol_fid > 0:
+        cp_acum["desafio_fidelidade"] = tot_bol_des / tot_bol_fid
+    else:
+        cp_acum["desafio_fidelidade"] = _cp_w_avg("desafio_fidelidade")
+
+    tot_nps_reg = df_acum["nps_registros"].sum()
+    if pd.notna(tot_nps_reg) and tot_nps_reg > 0:
+        cp_acum["nps_geral"] = float((df_acum["nps"] * df_acum["nps_registros"]).sum() / tot_nps_reg)
+    else:
+        cp_acum["nps_geral"] = _cp_w_avg("nps_geral")
+
+    cp_acum["nps_objetivo"] = 86.1
+    cp_acum["nps_variacao"] = "Acumulado no Período Selecionado"
+    cp_acum["nps_variacao_num"] = np.nan
+    cp_acum["nps_variacao_str"] = ""
+    cp_acum["benchmark_desc"] = ""
+
+    tot_atend = df_acum["clientes_atendidos"].sum()
+    if pd.notna(tot_atend) and tot_atend > 0:
+        tme_cp_secs = (df_acum["tme_ajustado_segundos"] * df_acum["clientes_atendidos"]).sum() / tot_atend
+        cp_acum["tme_medio"] = _seconds_to_time_str(int(round(tme_cp_secs)))
+    else:
+        secs_list = [_time_str_to_seconds(cp.get("tme_medio", "")) for cp in cps]
+        valid_secs = [s for s in secs_list if s > 0]
+        cp_acum["tme_medio"] = _seconds_to_time_str(int(round(np.mean(valid_secs)))) if valid_secs else "00:00:00"
+
+    tot_conv = df_acum["clientes_convertidos"].sum()
+    if pd.notna(tot_atend) and tot_atend > 0:
+        cp_acum["conversao_digital"] = tot_conv / tot_atend
+    else:
+        cp_acum["conversao_digital"] = _cp_w_avg("conversao_digital")
+
+    # 4. Consolidar Consultoras
+    consultant_overrides = aggregate_consultants(months_data_list)
+
+    # 5. Criar data_acum
+    data_acum = {}
+    for d in reversed(months_data_list):
+        for k, v in d.items():
+            if k not in data_acum:
+                data_acum[k] = v
+
+    data_acum["_is_acumulado"] = True
+    data_acum["_periodo"] = f"Acumulado ({periodo_label})"
+    data_acum["_periodo_anterior"] = ""
+    data_acum["_meses_selecionados"] = month_labels or []
+    data_acum["_deltas_cp"] = {}
+    data_acum["_deltas_pdv"] = pd.DataFrame()
+    data_acum["_consultant_data_override"] = consultant_overrides
+    data_acum["_log"] = [f"📊 Acumulado: {len(months_data_list)} competências ({periodo_label})"]
+
+    return df_acum, cp_acum, data_acum

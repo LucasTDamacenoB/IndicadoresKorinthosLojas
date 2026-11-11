@@ -34,9 +34,20 @@ importlib.reload(calculators)
 importlib.reload(visualizations)
 importlib.reload(pdf_report)
 
-from modules.calculators import build_consolidated, get_consultant_data, get_cp_summary, compute_deltas
+from modules.calculators import (
+    build_consolidated,
+    get_consultant_data,
+    get_cp_summary,
+    compute_deltas,
+    aggregate_months_data,
+)
 from modules.config import APP_CONFIG, TARGET_PDVS, get_pdv_label
-from modules.data_loader import auto_discover_local_files, load_all_files
+from modules.data_loader import (
+    auto_discover_local_files,
+    load_all_files,
+    discover_available_months,
+    load_files_for_folder,
+)
 from modules.pdf_report import generate_pdf_report
 from modules.visualizations import (
     render_tab_consulta_universal,
@@ -206,47 +217,136 @@ with st.sidebar:
     """)
     )
 
-    st.html("#### 📁 Importar / Atualizar Planilhas")
-    uploaded_files = st.file_uploader(
-        "Carregue planilhas .xlsx adicionais:",
-        type=["xlsx"],
-        accept_multiple_files=True,
-        help="Caso deseje substituir os dados automáticos, arraste aqui os novos arquivos do Gestão Integrada.",
-    )
+    # ─── SELETOR INTELIGENTE DE COMPETÊNCIAS / MULTI-MESES ───
+    st.html("#### 📅 Competência / Período")
+    available_months = discover_available_months()
+    
+    if available_months:
+        modo_visao = st.radio(
+            "Modo de Visualização:",
+            options=["Mês Individual", "Acumulado (Vários Meses)"],
+            index=0,
+            horizontal=True,
+            help="Escolha se deseja analisar um único mês fechado com comparativo MoM ou consolidar múltiplos meses."
+        )
+        
+        month_labels = [m["label"] for m in available_months]
+        
+        if modo_visao == "Mês Individual":
+            selected_label = st.selectbox(
+                "Mês de Referência:",
+                options=month_labels,
+                index=len(month_labels) - 1,
+                help="Selecione o mês desejado. O sistema identificará automaticamente o mês anterior para exibição das variações (deltas)."
+            )
+            curr_idx = month_labels.index(selected_label)
+            m_curr = available_months[curr_idx]
+            m_ant = available_months[curr_idx - 1] if curr_idx > 0 else None
+            selected_labels = [selected_label]
+        else:
+            default_selection = month_labels[-2:] if len(month_labels) >= 2 else month_labels
+            selected_labels = st.multiselect(
+                "Meses para Consolidar:",
+                options=month_labels,
+                default=default_selection,
+                help="Selecione 2 ou mais competências para calcular o resultado acumulado dos 9 PDVs e das consultoras."
+            )
+            m_curr = None
+            m_ant = None
+            selected_label = "Acumulado"
+    else:
+        modo_visao = "Mês Individual"
+        selected_label = None
+        m_curr = None
+        m_ant = None
+        selected_labels = []
+
+    with st.expander("📤 Upload Manual de Planilhas", expanded=False):
+        uploaded_files = st.file_uploader(
+            "Carregue planilhas .xlsx adicionais:",
+            type=["xlsx"],
+            accept_multiple_files=True,
+            help="Caso deseje substituir os dados automáticos, arraste aqui os novos arquivos do Gestão Integrada.",
+        )
 
     pdf_placeholder = st.empty()
     info_placeholder = st.empty()
 
 
 # ═══════════════════════════════════════════════════════════════════
-# CARREGAMENTO E CONSOLIDAÇÃO DE DADOS
+# CARREGAMENTO E CONSOLIDAÇÃO DE DADOS (COM CACHE)
 # ═══════════════════════════════════════════════════════════════════
 
+@st.cache_data(show_spinner=False)
+def get_cached_month_data(folder_path: str) -> dict:
+    """Carrega dados da pasta de um mês com cache de alta performance."""
+    return load_files_for_folder(folder_path)
 
-# Mês atual (fonte principal)
-local_files = auto_discover_local_files("mes_atual")
+
 if uploaded_files:
-    data = load_all_files(uploaded_files, base_files=local_files)
-else:
-    data = load_all_files(local_files)
+    # Se usuário enviou arquivos manuais via upload
+    data = load_all_files(uploaded_files)
+    data_ant = {}
+    df = build_consolidated(data)
+    df_ant = None
+    cp_summary = get_cp_summary(data)
+    cp_ant = {}
+    deltas_cp, deltas_pdv = compute_deltas(df, df_ant, cp_summary, cp_ant)
+    data["_deltas_cp"] = deltas_cp
+    data["_deltas_pdv"] = deltas_pdv
+    data["_periodo_anterior"] = ""
+    periodo_exibicao = data.get("_periodo", "Upload Manual")
+    badge_sub = "Arquivos Importados Manualmente"
+    modo_ativo = "Upload Manual"
 
-# Mês anterior (referência para comparativo)
-local_files_ant = auto_discover_local_files("mes_anterior")
-data_ant = load_all_files(local_files_ant) if local_files_ant else {}
+elif modo_visao == "Acumulado (Vários Meses)":
+    if not selected_labels:
+        st.warning("⚠️ Selecione pelo menos uma competência no seletor da barra lateral para visualizar o acumulado.")
+        st.stop()
+        
+    selected_month_objs = [m for m in available_months if m["label"] in selected_labels]
+    selected_month_objs.sort(key=lambda x: x["sort_key"])
+    ordered_labels = [m["label"] for m in selected_month_objs]
+    
+    with st.spinner("Consolidando competências selecionadas..."):
+        months_data_list = [get_cached_month_data(m["path"]) for m in selected_month_objs]
+        df, cp_summary, data = aggregate_months_data(months_data_list, ordered_labels)
+        
+    data_ant = {}
+    periodo_exibicao = f"Acumulado • {len(ordered_labels)} Meses"
+    badge_sub = f"{ordered_labels[0]} a {ordered_labels[-1]}" if len(ordered_labels) > 1 else ordered_labels[0]
+    modo_ativo = "Acumulado"
 
-df = build_consolidated(data)
-df_ant = build_consolidated(data_ant) if data_ant and data_ant.get("_log") else None
-cp_summary = get_cp_summary(data)
-cp_ant = get_cp_summary(data_ant) if data_ant and data_ant.get("_log") else {}
-deltas_cp, deltas_pdv = compute_deltas(df, df_ant, cp_summary, cp_ant)
+else:  # Mês Individual
+    if m_curr:
+        data = get_cached_month_data(m_curr["path"])
+        data_ant = get_cached_month_data(m_ant["path"]) if m_ant else {}
+    else:
+        local_files = auto_discover_local_files("mes_atual")
+        data = load_all_files(local_files)
+        local_files_ant = auto_discover_local_files("mes_anterior")
+        data_ant = load_all_files(local_files_ant) if local_files_ant else {}
 
-# Injetar deltas no dict de dados para propagar para as tabs
-data["_deltas_cp"] = deltas_cp
-data["_deltas_pdv"] = deltas_pdv
-data["_periodo_anterior"] = data_ant.get("_periodo", "") if data_ant else ""
+    df = build_consolidated(data)
+    df_ant = build_consolidated(data_ant) if data_ant and data_ant.get("_log") else None
+    cp_summary = get_cp_summary(data)
+    cp_ant = get_cp_summary(data_ant) if data_ant and data_ant.get("_log") else {}
+    deltas_cp, deltas_pdv = compute_deltas(df, df_ant, cp_summary, cp_ant)
+    
+    data["_deltas_cp"] = deltas_cp
+    data["_deltas_pdv"] = deltas_pdv
+    data["_periodo_anterior"] = data_ant.get("_periodo", "") if data_ant else ""
+    
+    periodo_exibicao = m_curr["label"] if m_curr else data.get("_periodo", "Período Atual")
+    if m_ant:
+        badge_sub = f"Ref. Anterior: {m_ant['label']} ({data_ant.get('_periodo', '')})"
+    elif data.get("_periodo_anterior"):
+        badge_sub = f"Ref. Anterior: {data.get('_periodo_anterior')}"
+    else:
+        badge_sub = "Primeiro Mês da Série (Sem mês anterior)"
+    modo_ativo = "Mês Individual"
 
 consultant_df = get_consultant_data(data)
-periodo_exibicao = data.get("_periodo", "Período Atual") if data else "Período Atual"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -257,27 +357,34 @@ if df is not None and not df.empty:
     # Log de arquivos na sidebar
     with info_placeholder.container():
         with st.expander("📋 Planilhas Processadas", expanded=False):
-            st.markdown(f"**Mês Atual ({len(data.get('_log', []))} arquivos):**")
-            for log_line in data.get("_log", []):
-                render_html(
-                    f'<div style="font-size: 12px; color: #334155; margin-bottom: 3px;">{log_line}</div>'
-                )
-            if data_ant and data_ant.get("_log"):
-                st.markdown(f"**Mês Anterior ({len(data_ant.get('_log', []))} arquivos):**")
-                for log_line in data_ant.get("_log", []):
+            if modo_ativo == "Acumulado":
+                st.markdown(f"**Competências Consolidadas ({len(selected_labels)}):**")
+                for lbl in selected_labels:
+                    render_html(f'<div style="font-size: 12px; color: #004225; font-weight: 700; margin-bottom: 2px;">• {lbl}</div>')
+                st.markdown(f"**Total de arquivos lidos:** {len(data.get('_log', []))}")
+            else:
+                st.markdown(f"**{periodo_exibicao} ({len(data.get('_log', []))} arquivos):**")
+                for log_line in data.get("_log", []):
                     render_html(
-                        f'<div style="font-size: 12px; color: #64748B; margin-bottom: 3px;">{log_line}</div>'
+                        f'<div style="font-size: 12px; color: #334155; margin-bottom: 3px;">{log_line}</div>'
                     )
+                if data_ant and data_ant.get("_log"):
+                    st.markdown(f"**Referência Anterior ({len(data_ant.get('_log', []))} arquivos):**")
+                    for log_line in data_ant.get("_log", []):
+                        render_html(
+                            f'<div style="font-size: 12px; color: #64748B; margin-bottom: 3px;">{log_line}</div>'
+                        )
 
     # Botão de exportação PDF na sidebar
     with pdf_placeholder.container():
         st.html("#### 📄 Relatório Executivo")
         try:
             pdf_bytes = generate_pdf_report(df, cp_summary, data_raw=data)
+            pdf_slug = "acumulado" if modo_ativo == "Acumulado" else (selected_label.replace(" / ", "_").replace(" ", "_").lower() if 'selected_label' in locals() and selected_label else "fechamento")
             st.download_button(
                 label="⬇️ Baixar Relatório PDF",
                 data=pdf_bytes,
-                file_name=f"relatorio_iaf2026_cp_korinthos_{pd.Timestamp.now().strftime('%Y%m%d')}.pdf",
+                file_name=f"relatorio_iaf2026_cp_korinthos_{pdf_slug}_{pd.Timestamp.now().strftime('%Y%m%d')}.pdf",
                 mime="application/pdf",
                 use_container_width=True,
             )
@@ -285,7 +392,7 @@ if df is not None and not df.empty:
             st.error(f"Exportação PDF: {e}")
 
     # ─── HEADER INSTITUCIONAL ─────────────────────────────────────
-    ref_ant_badge = f'<div style="font-size: 11px; color: #A7F3D0; margin-top: 2px;">Ref. Anterior: {data.get("_periodo_anterior")}</div>' if data.get("_periodo_anterior") else ''
+    ref_ant_badge = f'<div style="font-size: 11px; color: #A7F3D0; margin-top: 2px;">{badge_sub}</div>' if badge_sub else ''
     render_html(f"""
     <div style="background: linear-gradient(135deg, #004225 0%, #1B4D3E 100%); padding: 22px 28px; border-radius: 14px; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,66,37,0.15); color: #FFFFFF;">
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">

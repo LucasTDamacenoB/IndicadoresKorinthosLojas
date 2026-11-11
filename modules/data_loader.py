@@ -646,6 +646,55 @@ def discover_available_months(dados_dir: Optional[str] = None) -> List[Dict[str,
     return months
 
 
+def find_default_baseline_month(m_curr: Dict[str, Any], available_months: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Identifica automaticamente a competência ideal para comparativo (mês base / deltas).
+    - Se for pasta acumulada (ex: 'acumulado - setembro + outubro'):
+      localiza o mês anterior ao início do período acumulado (ex: Agosto / 2026).
+    - Se for mês individual regular (ex: Outubro / 2026):
+      localiza o mês regular anterior imediato (ex: Setembro / 2026).
+    """
+    if not m_curr or not available_months:
+        return None
+        
+    folder_name = m_curr.get("id", "").lower()
+    is_acumulado = "acumulado" in folder_name or "acumulado" in m_curr.get("label", "").lower()
+    
+    # Filtrar apenas competências regulares (1 a 12) ordenadas cronologicamente
+    regular_months = [m for m in available_months if m.get("month_num", 99) <= 12]
+    regular_months.sort(key=lambda x: x["sort_key"])
+    
+    if is_acumulado:
+        # Detectar quais meses estão contidos no nome da pasta acumulada
+        contained_months = []
+        for m_name, m_num in MONTH_NAMES.items():
+            if m_name in folder_name:
+                contained_months.append(m_num)
+                
+        if contained_months:
+            earliest_month = min(contained_months)
+            target_prev_num = earliest_month - 1
+            if target_prev_num >= 1:
+                for rm in regular_months:
+                    if rm.get("month_num") == target_prev_num:
+                        return rm
+                        
+        # Fallback para acumulado se não encontrar anterior ao início
+        if regular_months:
+            return regular_months[-1]
+    else:
+        # Mês regular: achar o mês imediatamente anterior na lista ordenada de meses regulares
+        curr_idx = -1
+        for i, rm in enumerate(regular_months):
+            if rm["label"] == m_curr["label"]:
+                curr_idx = i
+                break
+        if curr_idx > 0:
+            return regular_months[curr_idx - 1]
+            
+    return None
+
+
 def load_files_for_folder(folder_path: str) -> Dict[str, Any]:
     """Carrega todos os arquivos .xlsx válidos de uma subpasta."""
     if not os.path.isdir(folder_path):

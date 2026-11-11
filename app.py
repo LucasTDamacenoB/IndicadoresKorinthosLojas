@@ -47,6 +47,7 @@ from modules.data_loader import (
     load_all_files,
     discover_available_months,
     load_files_for_folder,
+    find_default_baseline_month,
 )
 from modules.pdf_report import generate_pdf_report
 from modules.visualizations import (
@@ -217,7 +218,7 @@ with st.sidebar:
     """)
     )
 
-    # ─── SELETOR INTELIGENTE DE COMPETÊNCIAS ───
+    # ─── SELETOR DE COMPETÊNCIA / MÊS ───
     st.html("#### 📅 Competência / Mês")
     available_months = discover_available_months()
     
@@ -229,14 +230,32 @@ with st.sidebar:
             default_idx = regular_indices[-1]
             
         selected_label = st.selectbox(
-            "Mês de Referência:",
+            "Visualizar Fechamento:",
             options=month_labels,
             index=default_idx,
-            help="Selecione o mês desejado. O sistema identifica automaticamente o mês anterior para exibição das variações (deltas)."
+            help="Selecione o mês desejado ou a pasta de período acumulado."
         )
         curr_idx = month_labels.index(selected_label)
         m_curr = available_months[curr_idx]
-        m_ant = available_months[curr_idx - 1] if curr_idx > 0 else None
+        
+        # Identificar automaticamente a melhor competência base para comparativo (deltas)
+        default_ant = find_default_baseline_month(m_curr, available_months)
+        default_ant_label = default_ant["label"] if default_ant else "Nenhum (Sem comparativo)"
+        
+        comp_options = ["Nenhum (Sem comparativo)"] + [m["label"] for m in available_months if m["label"] != selected_label]
+        comp_default_idx = comp_options.index(default_ant_label) if default_ant_label in comp_options else 0
+        
+        selected_ant_label = st.selectbox(
+            "Comparar com (Mês Base):",
+            options=comp_options,
+            index=comp_default_idx,
+            help="Competência de referência para cálculo das variações (Δ) e evolução dos indicadores."
+        )
+        
+        if selected_ant_label != "Nenhum (Sem comparativo)":
+            m_ant = next((m for m in available_months if m["label"] == selected_ant_label), None)
+        else:
+            m_ant = None
     else:
         selected_label = None
         m_curr = None
@@ -302,11 +321,12 @@ else:
     
     periodo_exibicao = m_curr["label"] if m_curr else data.get("_periodo", "Período Atual")
     if m_ant:
-        badge_sub = f"Ref. Anterior: {m_ant['label']} ({data_ant.get('_periodo', '')})"
+        ant_period_str = f" ({data_ant.get('_periodo')})" if data_ant.get('_periodo') else ""
+        badge_sub = f"Comparativo vs {m_ant['label']}{ant_period_str}"
     elif data.get("_periodo_anterior"):
-        badge_sub = f"Ref. Anterior: {data.get('_periodo_anterior')}"
+        badge_sub = f"Comparativo vs {data.get('_periodo_anterior')}"
     else:
-        badge_sub = "Primeiro Mês da Série (Sem mês anterior)"
+        badge_sub = "Sem base comparativa selecionada"
     modo_ativo = "Mês Individual"
 
 consultant_df = get_consultant_data(data)
